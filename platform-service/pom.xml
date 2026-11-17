@@ -1,0 +1,16 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"> <!-- 平台 REST 和 SSE 入口。 -->
+  <modelVersion>4.0.0</modelVersion> <!-- Maven 模型。 -->
+  <parent><groupId>com.agent4</groupId><artifactId>agent-workbench-parent</artifactId><version>2.0.0-SNAPSHOT</version></parent> <!-- 统一版本。 -->
+  <artifactId>platform-service</artifactId> <!-- 平台服务坐标。 -->
+  <dependencies> <!-- 平台不依赖 Worker 实现。 -->
+    <dependency><groupId>com.agent4</groupId><artifactId>backend-common</artifactId><version>${project.version}</version></dependency> <!-- 事务仓储。 -->
+    <dependency><groupId>com.agent4</groupId><artifactId>agent-core</artifactId><version>${project.version}</version></dependency> <!-- 知识分块算法。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency> <!-- MVC 与 SSE。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-validation</artifactId></dependency> <!-- 字段校验。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-oauth2-resource-server</artifactId></dependency> <!-- JWT 与 BCrypt。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency> <!-- 健康与指标。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency> <!-- API 集成验证。 -->
+    <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>test</scope></dependency> <!-- 测试数据库。 -->
+  </dependencies> <!-- 结束依赖。 -->
+  <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build> <!-- 可执行打包。 -->
+</project> <!-- 结束模块。 -->

@@ -1,0 +1,14 @@
+**/.git
+# 不向构建上下文发送版本库。
+data
+# 不复制原演示数据库。
+.env
+# 不发送本地密钥配置。
+**/src
+# 镜像只复制打包产物。
+**/target/classes
+# 运行时使用 JAR，不需要散装 class。
+**/target/test-classes
+# 测试类不进入镜像上下文。
+**/target/surefire-reports
+# 测试报告不进入镜像。

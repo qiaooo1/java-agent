@@ -1,0 +1,35 @@
+:root { color-scheme: light; --ink: #18332f; --muted: #6a7d77; --line: #dce5de; --accent: #236d50; } /* 统一浅色工作台视觉变量。 */
+* { box-sizing: border-box; } /* 内边距不增加布局宽度。 */
+body { margin: 0; background: #f3f5ee; color: var(--ink); font: 15px/1.65 system-ui, "Microsoft YaHei", sans-serif; } /* 中英文字体与阅读行距。 */
+header, main, footer { max-width: 1240px; margin: auto; padding: 28px 32px; } /* 页面宽度保持可读。 */
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); } /* 标题和退出入口分布两端。 */
+small { color: var(--accent); letter-spacing: .16em; font-weight: 700; } /* 使用小标题区分功能层级。 */
+h1 { font-size: clamp(27px, 4vw, 42px); letter-spacing: -.04em; margin: 10px 0 0; } /* 标题适配屏幕宽度。 */
+h2 { margin: 4px 0 15px; font-size: 20px; } /* 区块标题与正文建立层级。 */
+p { margin: 6px 0 14px; } /* 统一段落间距。 */
+.panel { background: #fffef9; border: 1px solid var(--line); border-radius: 16px; padding: 24px; } /* 功能区以轻边框分组。 */
+.auth { max-width: 530px; margin: 24px auto; } /* 登录表单宽度限制。 */
+#workspace:not([hidden]) { display: grid; grid-template-columns: 285px minmax(0, 1fr); gap: 22px; } /* 左侧历史、右侧任务内容。 */
+aside { align-self: start; position: sticky; top: 20px; } /* 历史列表在滚动时保留。 */
+.content { display: grid; gap: 22px; min-width: 0; } /* 避免长文本撑破主栏。 */
+label { display: block; margin: 12px 0; font-weight: 600; } /* 表单标签与控件上下排列。 */
+input, textarea, select { display: block; width: 100%; margin-top: 6px; padding: 11px 12px; border: 1px solid #cbd9cf; border-radius: 8px; background: white; color: var(--ink); font: inherit; } /* 控件保持一致的尺寸与交互区域。 */
+textarea { resize: vertical; } /* 允许扩展正文高度但不破坏列宽。 */
+input:focus, textarea:focus, select:focus { outline: 2px solid #a3c8b2; outline-offset: 1px; } /* 键盘操作有清楚的焦点。 */
+button { cursor: pointer; border: 0; border-radius: 8px; padding: 11px 17px; color: white; background: var(--accent); font: inherit; font-weight: 600; } /* 主要动作使用绿色强调。 */
+button.secondary { background: #eaf0e8; color: var(--ink); } /* 次要动作保持视觉低权重。 */
+button:disabled { opacity: .5; cursor: not-allowed; } /* 异步提交时禁止重复点击。 */
+.actions, .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; } /* 对齐并列操作。 */
+.controls { display: grid; grid-template-columns: 1fr 100px auto; gap: 14px; align-items: end; } /* 文档、步数和提交按钮同排。 */
+.controls button { margin-bottom: 12px; } /* 对齐表单控件底部。 */
+.muted, footer { color: var(--muted); font-size: 13px; } /* 次要说明减弱但保留对比度。 */
+#notice { position: sticky; bottom: 12px; background: #173f31; color: white; border-radius: 8px; padding: 12px 18px; white-space: pre-wrap; } /* 操作提示在页面下方可见。 */
+#notice:empty { display: none; } /* 无消息时不占空间。 */
+.task-item { display: block; width: 100%; text-align: left; background: transparent; color: var(--ink); padding: 12px 0; border-bottom: 1px solid var(--line); border-radius: 0; } /* 历史使用可点击文本列表。 */
+.task-item small { display: block; font-size: 11px; letter-spacing: .02em; } /* 显示独立状态标签。 */
+.task-item span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* 长任务目标不撑宽侧栏。 */
+#events { max-height: 430px; overflow: auto; } /* 限制轨迹区域高度。 */
+.event { border-left: 2px solid #c9d8ca; padding: 4px 12px; margin: 12px 0; } /* 时间线风格串起执行事件。 */
+pre { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.7 ui-monospace, "Microsoft YaHei", monospace; } /* 模型和工具输出安全换行。 */
+#answer:not(:empty) { background: #edf4e9; padding: 16px; border-radius: 10px; } /* 最终结果与执行轨迹分开显示。 */
+@media (max-width: 780px) { header, main, footer { padding: 20px; } #workspace:not([hidden]) { grid-template-columns: 1fr; } aside { position: static; } .controls { grid-template-columns: 1fr 80px; } .controls button { grid-column: 1 / -1; } } /* 小屏改成单列。 */

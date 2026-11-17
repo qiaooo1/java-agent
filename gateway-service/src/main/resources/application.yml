@@ -1,0 +1,13 @@
+spring: # 网关使用响应式依赖，与 Servlet 平台隔离。
+  application: # 日志服务标识。
+    name: gateway-service # 统一入口应用名。
+  data: # 仅连接 Redis，不连接 MySQL 和 RabbitMQ。
+    redis: # 多网关实例共享入口限流状态。
+      host: ${REDIS_HOST:localhost} # Compose 使用服务名。
+      port: ${REDIS_PORT:6379} # 默认端口。
+      timeout: 2s # 故障快速返回，避免连接无限等待。
+server: # 对外发布的服务端口。
+  port: ${GATEWAY_PORT:8080} # 浏览器统一访问此端口。
+workbench: # 通过环境变量连接平台服务。
+  platform-url: ${PLATFORM_URL:http://localhost:8081} # 多实例负载均衡可由部署层扩展。
+  jwt-secret: ${JWT_SECRET:local-development-secret-change-me-32-bytes} # 必须和平台一致，部署前覆盖默认值。

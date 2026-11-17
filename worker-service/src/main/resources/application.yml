@@ -1,0 +1,13 @@
+spring: # Worker 只启动消息消费，不提供用户 HTTP API。
+  application: # 日志区分应用。
+    name: worker-service # 服务名称。
+  main: # 无 Servlet 或 Netty 服务端口。
+    web-application-type: none # 避免内部接口暴露。
+  config: # 与平台使用同一套迁移和连接参数。
+    import: classpath:application-common.yml # 从共享 JAR 读取配置。
+workbench: # Worker 不承担发布器和恢复器的定时扫描。
+  dispatcher-enabled: false # 恢复由平台的有界扫描执行。
+agent: # 模型参数通过环境变量统一配置。
+  api-key: ${DEEPSEEK_API_KEY:} # 空值时使用明确标识的演示响应。
+  base-url: ${LLM_BASE_URL:https://api.deepseek.com} # 可指向本地模拟模型服务压测。
+  model: ${LLM_MODEL:deepseek-chat} # 不允许用户任意切换供应商与模型。

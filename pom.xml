@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd"> <!-- 统一管理版本和模块依赖方向。 -->
+  <modelVersion>4.0.0</modelVersion> <!-- Maven 标准模型。 -->
+  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.2.5</version><relativePath/></parent> <!-- 沿用原项目 Java 17 / Boot 基线。 -->
+  <groupId>com.agent4</groupId><artifactId>agent-workbench-parent</artifactId><version>2.0.0-SNAPSHOT</version><packaging>pom</packaging> <!-- 父工程只聚合模块。 -->
+  <properties><java.version>17</java.version><maven.compiler.parameters>true</maven.compiler.parameters><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding><testcontainers.version>1.21.4</testcontainers.version></properties> <!-- 保留中文和反射参数名，并使用兼容 Docker 29 的 Testcontainers 修订版。 -->
+  <modules> <!-- 按依赖方向构建。 -->
+    <module>agent-core</module> <!-- Agent 执行引擎。 -->
+    <module>common-contract</module> <!-- 跨服务协议。 -->
+    <module>backend-common</module> <!-- 事务仓储与中间件适配。 -->
+    <module>platform-service</module> <!-- 用户业务入口。 -->
+    <module>worker-service</module> <!-- 独立执行进程。 -->
+    <module>gateway-service</module> <!-- 统一网关。 -->
+    <module>legacy-demo</module> <!-- 保留旧版 SQLite 演示。 -->
+  </modules> <!-- 结束模块清单。 -->
+</project> <!-- 结束父工程。 -->

@@ -1,0 +1,28 @@
+<!doctype html> <!-- 原生页面无需安装 Node 或前端构建器。 -->
+<html lang="zh-CN"> <!-- 默认使用中文辅助阅读。 -->
+<head> <!-- 页面元数据与样式。 -->
+  <meta charset="UTF-8"> <!-- 保证中文事件和工具结果正确显示。 -->
+  <meta name="viewport" content="width=device-width,initial-scale=1"> <!-- 支持窄屏。 -->
+  <title>AgentWorkbench · 故障诊断与工单</title> <!-- 保留项目名称并明确业务场景。 -->
+  <link rel="stylesheet" href="/styles.css"> <!-- 样式独立成文件，便于按模块阅读。 -->
+  <script src="/app.js" defer></script> <!-- 交互逻辑不混入 HTML。 -->
+</head> <!-- 结束页面头。 -->
+<body> <!-- 所有动态文本均由 JavaScript 使用 textContent 渲染。 -->
+  <header><div><small>AGENT WORKBENCH / SUPPORT</small><h1>让故障调查有据可查。</h1><p>限定调查范围 · 逐步收集证据 · 人工确认结论</p></div><button id="logout" hidden>退出登录</button></header> <!-- 用户先看到业务价值。 -->
+  <main> <!-- 登录前后共用同一页面。 -->
+    <section id="auth" class="panel auth"><small>开始使用</small><h2>你的 AI 任务工作台</h2><p>创建账号后，任务、文档和执行记录仅对自己可见。</p><form id="authForm"><label>用户名<input id="username" autocomplete="username" pattern="[a-zA-Z0-9_]{3,32}" required placeholder="3—32 位字母、数字或下划线"></label><label>密码<input id="password" type="password" autocomplete="current-password" minlength="8" maxlength="64" required placeholder="至少 8 位"></label><div class="actions"><button value="login" type="submit">登录</button><button value="register" type="submit" class="secondary">注册账号</button></div></form></section> <!-- 访问令牌只保存在内存，刷新页面后重新登录。 -->
+    <div id="workspace" hidden> <!-- 已登录用户的功能区。 -->
+      <aside class="panel"><div class="section-title"><h2>任务历史</h2><button id="refresh" class="secondary">刷新</button></div><p id="quota" class="muted"></p><div id="tasks"></div><button id="more" class="secondary">加载更多</button></aside> <!-- 历史使用游标分页。 -->
+      <div class="content"> <!-- 任务输入、执行轨迹和知识库分区。 -->
+        <section class="panel"><small>INCIDENT</small><h2>提交故障工单</h2><p>当前连接独立演示环境，提供合成健康、指标与日志。调查只读，处理建议由人确认。</p><form id="incidentForm"><label>故障现象<textarea id="symptom" rows="3" maxlength="12000" required>任务提交后持续排队，请调查消息投递、Worker 与执行容量，给出证据和待确认事项。</textarea></label><div class="controls"><label>服务<input value="demo-workbench" readonly></label><label>演示环境<select id="environment"><option value="demo-a">环境 A</option><option value="demo-b">环境 B</option><option value="demo-c">环境 C</option><option value="demo-d">环境 D</option></select></label></div><div class="controls"><label>开始时间<input id="incidentFrom" type="datetime-local" required></label><label>结束时间<input id="incidentTo" type="datetime-local" required></label><button type="submit">开始调查 →</button></div></form><p class="muted">时间范围最多一小时。无模型密钥时使用明确标记的规则演示，不计入模型效果评估。</p></section> <!-- 页面不能扩大服务器授权范围。 -->
+        <section class="panel"><small>NEW TASK</small><h2>提交一个任务</h2><form id="taskForm"><label>任务目标<textarea id="goal" maxlength="12000" rows="4" required placeholder="例如：计算 (25+17)*8；或根据已上传文档回答问题。"></textarea></label><div class="controls"><label>知识文档<select id="knowledge"><option value="">不使用知识文档</option></select></label><label>最大步数<input id="steps" type="number" min="1" max="10" value="6"></label><button type="submit">提交任务 →</button></div></form><p class="muted">未配置模型密钥时返回明确标识的演示结果。关闭页面不会取消后台任务。</p></section> <!-- 提交接口立即返回任务编号。 -->
+        <section class="panel"><div class="section-title"><div><small>EXECUTION</small><h2 id="taskTitle">执行轨迹</h2></div><button id="cancel" class="secondary" disabled>请求取消</button></div><p id="taskMeta" class="muted">选择历史任务，或提交一个新任务。</p><pre id="answer"></pre><div id="events" aria-live="polite"></div></section> <!-- 事件按业务序号追加，重连时跳过重复。 -->
+        <section id="diagnosisPanel" class="panel" hidden><small>DIAGNOSIS REPORT</small><h2>诊断报告与人工交接</h2><div id="diagnosisReport"></div><p id="reviewState" class="muted"></p><form id="reviewForm"><label>确认说明<textarea id="reviewNote" maxlength="1000" rows="2" required placeholder="记录你的判断或转交原因；确认不代表故障已修复。"></textarea></label><div class="actions"><button id="confirmReview" type="submit" value="CONFIRMED">确认已阅</button><button id="escalateReview" type="submit" value="ESCALATED" class="secondary">转交人工处理</button></div></form></section> <!-- 人工状态与任务执行状态分开显示。 -->
+        <section class="panel"><small>KNOWLEDGE</small><h2>上传文本知识</h2><form id="knowledgeForm"><label>文档标题<input id="documentTitle" maxlength="120" required placeholder="项目接口说明"></label><label>正文<textarea id="documentContent" maxlength="100000" rows="4" required placeholder="粘贴需要 Agent 检索的资料，最多十万字符。"></textarea></label><button type="submit">保存文档</button></form></section> <!-- 文档分块和向量存储采用同一事务。 -->
+      </div> <!-- 结束主功能区。 -->
+    </div> <!-- 结束工作空间。 -->
+    <p id="notice" role="status"></p> <!-- 错误和状态提示使用纯文本，避免注入。 -->
+  </main> <!-- 结束主区域。 -->
+  <footer>Java 后端任务平台 / 任务状态与额度以数据库事务为准</footer> <!-- 解释产品行为，不展示内部密钥或配置。 -->
+</body> <!-- 结束页面内容。 -->
+</html> <!-- 结束文档。 -->

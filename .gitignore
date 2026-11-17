@@ -1,0 +1,32 @@
+# Maven build output
+target/
+
+# Local data
+data/
+*.db
+
+# IDE settings
+.idea/
+*.iml
+.vscode/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+.deps/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary files and generated output
+.chart-data-*/
+.mplconfig/
+.screenshots/
+tmp/
+output/
+/camel-framework/

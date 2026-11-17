@@ -1,0 +1,38 @@
+spring: # 两个后端服务共享数据库与中间件配置。
+  datasource: # 通过环境变量连接 Compose 或已有数据库。
+    url: ${DB_URL:jdbc:mysql://localhost:3306/workbench?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&characterEncoding=UTF-8} # 显式统一 UTC，减少账期和租约歧义。
+    username: ${DB_USER:workbench} # 使用业务数据库用户。
+    password: ${DB_PASSWORD:workbench-local} # 仅本地演示默认值，部署通过环境覆盖。
+    hikari: # 限制每个实例占用的数据库连接。
+      maximum-pool-size: 12 # 多 Worker 扩容时必须一起核算数据库连接总量。
+      connection-timeout: 3000 # 数据库拥塞时快速失败，避免无限等待。
+  flyway: # 平台与 Worker 对同一 schema 使用相同迁移。
+    enabled: true # 启动时校验版本。
+  data: # Redis 只保存协作状态，不保存最终业务事实。
+    redis: # 服务端统一读取环境变量。
+      host: ${REDIS_HOST:localhost} # Compose 中使用服务名 redis。
+      port: ${REDIS_PORT:6379} # 默认 Redis 端口。
+      timeout: 2s # 故障时有界等待。
+  rabbitmq: # 消息持久化和发送确认。
+    host: ${RABBIT_HOST:localhost} # Compose 中使用服务名 rabbitmq。
+    username: ${RABBIT_USER:workbench} # 本地业务用户。
+    password: ${RABBIT_PASSWORD:workbench-local} # 部署时替换。
+    publisher-confirm-type: correlated # 按消息标识关联发布确认。
+    publisher-returns: true # 检测不可路由的消息。
+    listener: # Worker 消费配置。
+      simple: # 固定并发，避免失控调用上游模型。
+        acknowledge-mode: manual # 状态持久化后再确认消息。
+        prefetch: 1 # 每个消费者仅预取一个长任务，减少任务占坑。
+        concurrency: 2 # 每个实例同时执行两个任务。
+        max-concurrency: 2 # 扩容需要显式修改配置并压测。
+        default-requeue-rejected: false # 永久错误不能无限热循环。
+agent: # 模型名由平台快照，Worker 按快照执行。
+  model: ${LLM_MODEL:deepseek-chat} # 两端首次部署配置保持一致。
+workbench: # 项目自己的业务限制。
+  monthly-tasks: ${MONTHLY_TASKS:100} # 按成功任务次数计量，token 单独记录。
+  max-inflight: ${MAX_INFLIGHT:10} # 每个用户最多占用的排队及执行任务数。
+  worker-concurrency: ${USER_CONCURRENCY:2} # 一个用户在所有 Worker 上的共享执行上限。
+  provider-concurrency: ${PROVIDER_CONCURRENCY:8} # 所有实例共同遵守的模型并发上限。
+  lease-seconds: 30 # 数据库执行租约，Worker 每五秒续约。
+  max-runtime-seconds: ${MAX_RUNTIME_SECONDS:180} # 单次尝试总时限，避免永久续租。
+  jwt-secret: ${JWT_SECRET:local-development-secret-change-me-32-bytes} # 网关与平台使用同一签名密钥。

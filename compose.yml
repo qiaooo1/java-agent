@@ -1,0 +1,132 @@
+name: agent-workbench # Compose 资源使用独立项目名，避免覆盖其他项目。
+services: # 三个中间件与三个业务进程。
+  mysql: # 业务事实和单库事务来源。
+    image: mysql:8.0.36 # 固定可复现基线，升级前运行迁移与集成测试。
+    mem_limit: 768m # 固定本地实验资源，避免数据库与 Java 争抢全部内存。
+    environment: # 仅用于本机开发，公开部署需替换默认密码。
+      MYSQL_DATABASE: workbench # Flyway 负责建表。
+      MYSQL_USER: workbench # 业务账号不使用 root。
+      MYSQL_PASSWORD: ${DB_PASSWORD:-workbench-local} # 可由本地环境覆盖。
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-local-only} # 根账户只用于容器管理。
+      TZ: UTC # 与账期和 JDBC 会话时间一致。
+    ports: ["127.0.0.1:3307:3306"] # 调试端口只绑定本机，避免碰现有 MySQL。
+    volumes: ["mysql-data:/var/lib/mysql"] # 保留数据，停止服务不会默认删除。
+    healthcheck: # 平台等待数据库可以建立连接。
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"] # 使用容器内变量避免 Compose 提前展开。
+      interval: 5s # 周期检查。
+      timeout: 3s # 单次检查有界。
+      retries: 30 # 初次初始化允许较长时间。
+  redis: # 多实例共享限流与执行槽位。
+    image: redis:7.2.4-alpine # Lua 和有序集合所需的稳定基础。
+    mem_limit: 192m # 为一百二十八兆数据限制预留进程开销。
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"] # 协调状态不能被缓存淘汰策略静默驱逐。
+    ports: ["127.0.0.1:6380:6379"] # 仅用于本机调试。
+    volumes: ["redis-data:/data"] # 重启保留短期协调状态，成员仍按过期时间清理。
+    healthcheck: # 检查 Redis 可服务。
+      test: ["CMD", "redis-cli", "ping"] # 不执行写操作。
+      interval: 5s # 周期检查。
+      timeout: 3s # 有界等待。
+      retries: 20 # 限制启动重试。
+  rabbitmq: # 持久化异步任务队列。
+    image: rabbitmq:3.13.7-management-alpine # 固定本地实验版本，不作为生产安全基线承诺。
+    mem_limit: 512m # 有界本地 broker 资源，压测时需观察内存水位。
+    environment: # 创建可被其他容器访问的业务用户。
+      RABBITMQ_DEFAULT_USER: workbench # 不使用仅限回环的 guest。
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASSWORD:-workbench-local} # 部署时通过环境替换。
+    ports: ["127.0.0.1:${RABBIT_HOST_PORT:-18073}:5672", "127.0.0.1:15673:15672"] # 宿主机端口可配置，避开 Windows 已保留的 5673。
+    volumes: ["rabbit-data:/var/lib/rabbitmq"] # 队列和持久消息重启后保留。
+    healthcheck: # 业务服务在 broker 就绪后启动。
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"] # 检查 Erlang 节点存活。
+      interval: 5s # 周期检查。
+      timeout: 5s # 有界等待。
+      retries: 30 # 允许首次启动。
+  platform: # 用户 API、页面、Outbox 与恢复器。
+    mem_limit: 512m # JVM 按容器限制计算堆空间，保留堆外和线程内存。
+    build: # 打包产物先在宿主机生成。
+      context: . # Dockerfile 从根目录复制模块 JAR。
+      dockerfile: deploy/Dockerfile # 三个应用复用轻量运行镜像。
+      args: # 指定唯一可执行包，避免复制 original JAR。
+        JAR_FILE: platform-service/target/platform-service-2.0.0-SNAPSHOT.jar # 平台产物路径。
+    environment: # 配置连接 Compose 内部 DNS。
+      DB_URL: jdbc:mysql://mysql:3306/workbench?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&characterEncoding=UTF-8 # 统一数据库会话时区。
+      DB_PASSWORD: ${DB_PASSWORD:-workbench-local} # 与 MySQL 业务账户一致。
+      REDIS_HOST: redis # 内部连接不走宿主机端口。
+      RABBIT_HOST: rabbitmq # RabbitMQ 服务名。
+      RABBIT_PASSWORD: ${RABBIT_PASSWORD:-workbench-local} # 与 broker 用户一致。
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me-32-bytes} # 与网关共享验签密钥。
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat} # 提交时将模型名写入任务配置快照。
+    ports: ["127.0.0.1:8081:8081"] # 便于验证绕过网关仍不能伪造身份。
+    healthcheck: # JVM 启动与基础设施连接完成后才允许依赖服务启动。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8081/actuator/health"] # 只访问无敏感信息的健康端点。
+      interval: 5s # 定期检查平台实际可服务。
+      timeout: 4s # 数据库或消息故障时不能无限等待。
+      retries: 30 # 给首次 Java 初始化留出时间。
+      start_period: 20s # 启动阶段不立即判定故障。
+    depends_on: # 在中间件健康后启动 Flyway 与业务组件。
+      mysql: {condition: service_healthy} # 数据库就绪。
+      redis: {condition: service_healthy} # 共享限流就绪。
+      rabbitmq: {condition: service_healthy} # 消息拓扑可声明。
+  worker: # 可以使用 --scale worker=2 扩展实例。
+    mem_limit: 512m # 每个执行实例具有相同可比较的资源配额。
+    build: # 与平台独立进程运行。
+      context: . # 使用同一仓库上下文。
+      dockerfile: deploy/Dockerfile # 通用 JRE 镜像。
+      args: # Worker 没有公开端口。
+        JAR_FILE: worker-service/target/worker-service-2.0.0-SNAPSHOT.jar # 执行服务产物。
+    environment: # 与平台共享数据库作为当前架构的事务边界。
+      DB_URL: jdbc:mysql://mysql:3306/workbench?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&characterEncoding=UTF-8 # UTC JDBC 会话。
+      DB_PASSWORD: ${DB_PASSWORD:-workbench-local} # 业务数据库密码。
+      REDIS_HOST: redis # 共享执行容量。
+      RABBIT_HOST: rabbitmq # 消费任务队列。
+      RABBIT_PASSWORD: ${RABBIT_PASSWORD:-workbench-local} # 消息账号密码。
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-} # 空值进入演示模式，不在仓库保存真实密钥。
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com} # 可替换为可控延迟的模型模拟器。
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat} # 所有 Worker 使用相同模型配置。
+      DIAGNOSIS_SOURCE_URL: http://diagnosis-source:18091 # 固定只读证据源，不从工单接收 URL。
+    depends_on: # 首次启动等待平台完成数据库初始化。
+      platform: {condition: service_healthy} # 等平台完成迁移与拓扑初始化后开始消费。
+      mysql: {condition: service_healthy} # JDBC 可连接。
+      redis: {condition: service_healthy} # 执行槽位可申请。
+      rabbitmq: {condition: service_healthy} # 队列可消费。
+      diagnosis-source: {condition: service_healthy} # 演示现场独立于平台中间件，不向主平台注入故障。
+  diagnosis-source: # 固定合成证据服务，不是生产日志代理。
+    image: node:20-alpine # 与已有模拟器共用 Node 镜像。
+    user: "1000:1000" # 不需要 root 或宿主机资源权限。
+    mem_limit: 96m # 实验辅助服务资源有界。
+    command: ["node", "/app/diagnosis-source.mjs"] # 无 npm 依赖。
+    volumes: ["./scripts/diagnosis-source.mjs:/app/diagnosis-source.mjs:ro"] # 只挂载脚本，不挂 Docker socket 或系统日志。
+    ports: ["127.0.0.1:18091:18091"] # 仅供本机实验读取。
+    healthcheck: # 检查证据服务自身，而不是模拟组件状态。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:18091/health"] # 只读就绪检查。
+      interval: 5s # 小型脚本启动迅速。
+      timeout: 3s # 不无限等待。
+      retries: 10 # 启动失败明确可见。
+  gateway: # 用户统一入口。
+    mem_limit: 384m # 限制入口 JVM 的资源占用。
+    build: # 网关与业务服务独立镜像。
+      context: . # 项目根目录上下文。
+      dockerfile: deploy/Dockerfile # 复用 JRE 基础镜像。
+      args: # 显式选择网关 JAR。
+        JAR_FILE: gateway-service/target/gateway-service-2.0.0-SNAPSHOT.jar # 响应式入口产物。
+    environment: # 网关无需数据库和 MQ 权限。
+      REDIS_HOST: redis # 共享入口限流。
+      PLATFORM_URL: http://platform:8081 # Compose DNS 路由到平台。
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me-32-bytes} # 与平台一致。
+    ports: ["127.0.0.1:${GATEWAY_HOST_PORT:-18080}:8080"] # 宿主机端口可配置，避开 Windows 已保留的 8080 端口。
+    depends_on: # 启动顺序不替代应用重连机制。
+      platform: {condition: service_healthy} # 避免网关在平台未就绪时接收业务流量。
+      redis: {condition: service_healthy} # 限流设施就绪。
+  mock-model: # 可选压测服务，默认正常启动不包含它。
+    profiles: ["benchmark"] # 只有显式启用 benchmark profile 才运行。
+    image: node:20-alpine # 使用官方 Node 运行内置 HTTP 模拟器。
+    user: "1000:1000" # 模拟器不需要 root 权限。
+    mem_limit: 128m # 控制实验辅助进程的资源占用。
+    command: ["node", "/app/mock-llm.mjs"] # 不安装额外 npm 依赖。
+    volumes: ["./scripts/mock-llm.mjs:/app/mock-llm.mjs:ro"] # 只读挂载脚本，不挂载用户目录或密钥。
+    environment: # 实验记录必须保留这个延迟参数。
+      MOCK_DELAY_MS: ${MOCK_DELAY_MS:-2000} # 默认两秒，用于观察排队与并发。
+    ports: ["127.0.0.1:18090:18090"] # 仅本机读取模拟器计数。
+volumes: # 项目独立命名的数据卷。
+  mysql-data: {} # 业务数据。
+  redis-data: {} # 协调状态。
+  rabbit-data: {} # 持久消息。

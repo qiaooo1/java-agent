@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Agent 工作台</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+    --text-dim: #8b93a3;
+    --accent: #4f8cff;
+    --accent-2: #35c2b0;
+    --amber: #f2b33d;
+    --green: #35c26a;
+    --red: #e5484d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    height: 100vh;
+    display: flex;
+    overflow: hidden;
+  }
+  /* 侧栏 */
+  .sidebar {
+    width: 280px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  .sidebar h1 {
+    font-size: 16px;
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sidebar h1 .logo {
+    width: 28px; height: 28px; border-radius: 6px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: bold; color: #fff;
+  }
+  .quota-card {
+    margin: 12px;
+    padding: 12px;
+    background: var(--panel-2);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .quota-card .label { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+  .quota-bar {
+    height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .quota-bar .fill {
+    height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width 0.4s;
+  }
+  .quota-card .nums { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+  .knowledge-card {
+    margin: 0 12px 12px;
+    padding: 12px;
+    background: var(--panel-2);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .knowledge-card .label { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .knowledge-card .nums { font-size: 12px; color: var(--text); margin-bottom: 8px; }
+  .knowledge-actions .mini-btn {
+    width: 100%;
+    background: var(--panel);
+    color: var(--accent-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 0;
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .knowledge-actions .mini-btn:hover { border-color: var(--accent-2); }
+  .history {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 12px 12px;
+  }
+  .history .section-title {
+    font-size: 12px; color: var(--text-dim); margin: 12px 4px 8px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .history-item {
+    padding: 10px;
+    background: var(--panel-2);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: border-color 0.2s;
+  }
+  .history-item:hover { border-color: var(--accent); }
+  .history-item .goal {
+    font-size: 13px; margin-bottom: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .history-item .meta { font-size: 11px; color: var(--text-dim); }
+  .badge {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 11px; font-weight: 500;
+  }
+  .badge.COMPLETED { background: rgba(53,194,106,0.15); color: var(--green); }
+  .badge.ERROR, .badge.ABORTED { background: rgba(229,72,77,0.15); color: var(--red); }
+  /* 主区 */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .chat-area {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+  }
+  .msg { margin-bottom: 20px; max-width: 800px; }
+  .msg .role {
+    font-size: 12px; color: var(--text-dim); margin-bottom: 6px;
+    font-weight: 600;
+  }
+  .msg.user .bubble {
+    background: var(--accent);
+    color: #fff;
+    padding: 12px 16px;
+    border-radius: 12px 12px 4px 12px;
+    display: inline-block;
+  }
+  .msg.assistant .bubble {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    padding: 12px 16px;
+    border-radius: 4px 12px 12px 12px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  /* 工具调用卡片 */
+  .tool-call {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--amber);
+    border-radius: 8px;
+    padding: 12px;
+    margin: 10px 0;
+    font-size: 13px;
+  }
+  .tool-call .tool-name {
+    color: var(--amber);
+    font-weight: 600;
+    margin-bottom: 6px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .tool-call .tool-args {
+    color: var(--text-dim);
+    font-family: "Consolas", monospace;
+    font-size: 12px;
+    margin-bottom: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .tool-call .tool-result {
+    color: var(--green);
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    border-top: 1px dashed var(--border);
+    padding-top: 6px;
+  }
+  .iteration-tag {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    background: rgba(79,140,255,0.12); color: var(--accent);
+    font-size: 11px; margin-bottom: 10px;
+  }
+  /* 输入区 */
+  .input-area {
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .input-row { display: flex; gap: 10px; max-width: 800px; }
+  .input-row textarea {
+    flex: 1;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    padding: 12px 14px;
+    font-size: 14px;
+    resize: none;
+    height: 52px;
+    font-family: inherit;
+    outline: none;
+  }
+  .input-row textarea:focus { border-color: var(--accent); }
+  .input-row button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 0 24px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .typing {
+    display: inline-block; color: var(--text-dim); font-size: 13px;
+  }
+  .typing::after {
+    content: "▋"; animation: blink 1s infinite; color: var(--accent-2);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .empty-hint {
+    color: var(--text-dim); text-align: center; margin-top: 80px; font-size: 14px;
+  }
+  .empty-hint .suggestions { margin-top: 20px; }
+  .empty-hint .suggestion {
+    display: inline-block; margin: 6px; padding: 8px 14px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 20px; cursor: pointer; font-size: 13px;
+    transition: border-color 0.2s;
+  }
+  .empty-hint .suggestion:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+  <aside class="sidebar">
+    <h1><span class="logo">AI</span> Agent 工作台</h1>
+    <div class="quota-card">
+      <div class="label">本月 Token 配额</div>
+      <div class="quota-bar"><div class="fill" id="quotaFill" style="width:0%"></div></div>
+      <div class="nums" id="quotaNums">0 / 1,000,000</div>
+    </div>
+    <div class="history" id="historyList">
+      <div class="section-title">任务历史</div>
+    </div>
+    <div class="knowledge-card">
+      <div class="label">知识库（RAG）</div>
+      <div class="nums" id="knowledgeNums">已摄入 0 个片段</div>
+      <div class="knowledge-actions">
+        <button class="mini-btn" onclick="quickIngest()">摄入示例文档</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="chat-area" id="chatArea">
+      <div class="empty-hint" id="emptyHint">
+        我是一个能调用工具的 AI Agent<br>
+        试试问我下面这些，我会实时展示思考与工具调用过程
+        <div class="suggestions">
+          <span class="suggestion" onclick="ask('帮我算一下 128 * 37 + 256 等于多少')">算个数学题</span>
+          <span class="suggestion" onclick="ask('现在几点了？')">查时间</span>
+          <span class="suggestion" onclick="ask('帮我记一条笔记：明天下午三点开会')">记笔记</span>
+          <span class="suggestion" onclick="ask('我刚才记了什么笔记？')">查笔记</span>
+          <span class="suggestion" onclick="ask('根据知识库，苍穹外卖的菜品接口怎么分页查询？')">检索知识库</span>
+        </div>
+      </div>
+    </div>
+    <div class="input-area">
+      <div class="input-row">
+        <textarea id="input" placeholder="输入你的问题，Enter 发送，Shift+Enter 换行"></textarea>
+        <button id="sendBtn" onclick="send()">发送</button>
+      </div>
+    </div>
+  </main>
+
+<script>
+  const sessionId = "demo-user";
+  let currentAssistant = null;
+
+  const chatArea = document.getElementById("chatArea");
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("sendBtn");
+  const emptyHint = document.getElementById("emptyHint");
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  function ask(text) {
+    input.value = text;
+    send();
+  }
+
+  function send() {
+    const goal = input.value.trim();
+    if (!goal) return;
+    input.value = "";
+    sendBtn.disabled = true;
+    if (emptyHint) emptyHint.remove();
+
+    addUserMessage(goal);
+    currentAssistant = addAssistantMessage();
+
+    fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, goal })
+    }).then(res => {
+      if (!res.ok || !res.body) throw new Error('请求失败，HTTP ' + res.status); // 在解析 SSE 前识别输入错误和服务过载。
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      function pump() {
+        return reader.read().then(({ done, value }) => {
+          if (done) { finish(); return; }
+          buffer += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buffer.indexOf("\n\n")) >= 0) {
+            const raw = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            handleSse(raw);
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(err => {
+      if (currentAssistant) currentAssistant.output.textContent = '⚠ ' + err.message; // 将网络失败显示为纯文本，避免页面一直停留在思考状态。
+      currentAssistant?.bubble.querySelector('.typing')?.remove(); // 请求失败后移除等待提示。
+      finish();
+    });
+  }
+
+  function handleSse(raw) {
+    let event = "message", data = "";
+    for (const line of raw.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    if (!data) return;
+    let payload;
+    try { payload = JSON.parse(data); } catch { payload = data; }
+
+    switch (event) {
+      case "start":
+        break;
+      case "iteration":
+        if (currentAssistant) {
+          const tag = document.createElement("div");
+          tag.className = "iteration-tag";
+          tag.textContent = "第 " + payload.step + " 轮思考";
+          currentAssistant.bubble.appendChild(tag);
+        }
+        break;
+      case "delta":
+        if (currentAssistant && payload) {
+          currentAssistant.text += payload;
+          currentAssistant.bubble.querySelector('.typing')?.remove(); // 首个文本增量到达后移除等待提示。
+          currentAssistant.output.textContent = currentAssistant.text; // 只更新文本区域，保留轮次和工具执行卡片。
+          scrollBottom();
+        }
+        break;
+      case "action":
+        if (currentAssistant) addToolCall(currentAssistant, payload);
+        break;
+      case "observation":
+        if (currentAssistant) addObservation(currentAssistant, payload);
+        break;
+      case "answer":
+        if (currentAssistant) {
+          currentAssistant.text = payload;
+          currentAssistant.bubble.querySelector('.typing')?.remove(); // 最终答案到达时结束等待提示。
+          currentAssistant.output.textContent = payload; // 最终答案不应覆盖已有工具轨迹。
+          scrollBottom();
+        }
+        break;
+      case "error":
+        if (currentAssistant) {
+          currentAssistant.bubble.querySelector('.typing')?.remove(); // 服务端拒绝任务时结束等待状态。
+          currentAssistant.output.textContent = "⚠ " + payload; // 保留已显示的工具卡片，只更新错误文本。
+          currentAssistant.bubble.style.color = "var(--red)";
+        }
+        break;
+      case "usage":
+        break;
+      case "done":
+        finish();
+        break;
+    }
+  }
+
+  function addUserMessage(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = '<div class="role">你</div><div class="bubble"></div>';
+    div.querySelector(".bubble").textContent = text;
+    chatArea.appendChild(div);
+    scrollBottom();
+  }
+
+  function addAssistantMessage() {
+    const div = document.createElement("div");
+    div.className = "msg assistant";
+    div.innerHTML = '<div class="role">Agent</div><div class="bubble"></div>';
+    chatArea.appendChild(div);
+    const bubble = div.querySelector(".bubble");
+    bubble.innerHTML = '<span class="typing">思考中</span>';
+    const output = document.createElement('div'); // 为模型文本分配独立容器，避免刷新时清空工具卡片。
+    bubble.appendChild(output); // 将文本容器添加到当前回复。
+    const obj = { bubble, output, text: "" }; // 保存文本节点引用，供流式事件更新。
+    scrollBottom();
+    return obj;
+  }
+
+  function addToolCall(assistant, payload) {
+    assistant.bubble.querySelector(".typing")?.remove();
+    const card = document.createElement("div");
+    card.className = "tool-call";
+    card.innerHTML = '<div class="tool-name"></div><div class="tool-args"></div><div class="tool-result"></div>'; // 仅将固定模板作为 HTML 解析。
+    card.querySelector('.tool-name').textContent = '🔧 ' + payload.name; // 工具名称作为纯文本显示，阻止 HTML 注入。
+    card.querySelector('.tool-args').textContent = '参数: ' + (payload.arguments || '{}'); // 参数可能包含用户内容，必须使用纯文本渲染。
+    assistant.bubble.appendChild(card);
+    assistant._lastTool = card.querySelector(".tool-result");
+    scrollBottom();
+  }
+
+  function addObservation(assistant, payload) {
+    if (assistant._lastTool) {
+      assistant._lastTool.textContent = "→ " + payload.result;
+    }
+    scrollBottom();
+  }
+
+  function scrollBottom() {
+    chatArea.scrollTop = chatArea.scrollHeight;
+  }
+
+  function finish() {
+    sendBtn.disabled = false;
+    loadQuota();
+    loadHistory();
+  }
+
+  function loadQuota() {
+    fetch("/api/quota?sessionId=" + sessionId)
+      .then(r => r.json())
+      .then(d => {
+        const pct = d.quota > 0 ? Math.min(100, d.used / d.quota * 100) : 0;
+        document.getElementById("quotaFill").style.width = pct + "%";
+        document.getElementById("quotaNums").textContent =
+          d.used.toLocaleString() + " / " + d.quota.toLocaleString() + "（任务 " + d.taskCount + " 个）";
+      });
+  }
+
+  function loadKnowledge() {
+    fetch("/api/knowledge")
+      .then(r => r.json())
+      .then(d => {
+        document.getElementById("knowledgeNums").textContent =
+          "已摄入 " + (d.chunkCount || 0) + " 个片段";
+      });
+  }
+
+  function quickIngest() {
+    const source = "苍穹外卖接口文档（示例）";
+    const content = "苍穹外卖菜品分页查询接口：GET /api/dish/page，参数 page（页码，从 1 开始）、" +
+      "pageSize（每页条数，默认 10，最大 50）、name（菜品名称模糊匹配，可选）、" +
+      "categoryId（分类 ID，可选）、status（菜品状态 1=起售 0=停售，可选）。" +
+      "返回字段包括 records（当前页数据）、total（总条数）、pages（总页数）。" +
+      "新增菜品接口：POST /api/dish，需要 name、price（单位元，保留两位小数）、" +
+      "categoryId、description（可选）。菜品状态默认为停售，需调用起售接口单独开启。";
+    fetch("/api/knowledge/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, content })
+    }).then(r => r.json()).then(d => {
+      loadKnowledge();
+      alert("已摄入文档「" + source + "」，共 " + d.chunks + " 个片段。现在可以问：根据知识库，苍穹外卖的菜品接口怎么分页查询？");
+    });
+  }
+
+  function loadHistory() {
+    fetch("/api/history?sessionId=" + sessionId)
+      .then(r => r.json())
+      .then(d => {
+        const list = document.getElementById("historyList");
+        list.innerHTML = '<div class="section-title">任务历史</div>';
+        if (!d.tasks || d.tasks.length === 0) {
+          list.innerHTML += '<div class="section-title" style="text-transform:none">暂无任务</div>';
+          return;
+        }
+        for (const t of d.tasks) {
+          const item = document.createElement("div");
+          item.className = "history-item";
+          item.innerHTML = '<div class="goal">' + escapeHtml(t.goal) + '</div>' +
+            '<div class="meta"><span class="badge ' + t.status + '">' + t.status + '</span> ' +
+            (t.promptTokens + t.completionTokens).toLocaleString() + ' tokens · ' +
+            (t.durationMs / 1000).toFixed(1) + 's</div>';
+          item.onclick = () => showTask(t);
+          list.appendChild(item);
+        }
+      });
+  }
+
+  function showTask(t) {
+    if (emptyHint) emptyHint.remove();
+    addUserMessage(t.goal);
+    const a = addAssistantMessage();
+    a.text = t.answer || t.error || "(无输出)";
+    a.bubble.textContent = a.text;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  loadQuota();
+  loadHistory();
+  loadKnowledge();
+</script>
+</body>
+</html>

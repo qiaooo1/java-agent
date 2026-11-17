@@ -1,0 +1,13 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"> <!-- 响应式入口不依赖 JDBC。 -->
+  <modelVersion>4.0.0</modelVersion> <!-- Maven 模型。 -->
+  <parent><groupId>com.agent4</groupId><artifactId>agent-workbench-parent</artifactId><version>2.0.0-SNAPSHOT</version></parent> <!-- 统一 Boot 基线。 -->
+  <artifactId>gateway-service</artifactId> <!-- 网关坐标。 -->
+  <dependencyManagement><dependencies><dependency><groupId>org.springframework.cloud</groupId><artifactId>spring-cloud-dependencies</artifactId><version>2023.0.1</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement> <!-- 匹配 Boot 3.2 的 Cloud 基线。 -->
+  <dependencies> <!-- 非阻塞代理、共享限流和 JWT 验证。 -->
+    <dependency><groupId>org.springframework.cloud</groupId><artifactId>spring-cloud-starter-gateway</artifactId></dependency> <!-- 路由与令牌桶。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis-reactive</artifactId></dependency> <!-- 网关 Redis 访问。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-oauth2-resource-server</artifactId></dependency> <!-- 独立验证 JWT。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency> <!-- 验证入口拒绝与故障策略。 -->
+  </dependencies> <!-- 结束依赖。 -->
+  <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build> <!-- 可执行打包。 -->
+</project> <!-- 结束模块。 -->

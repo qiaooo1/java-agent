@@ -1,0 +1,11 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"> <!-- 独立执行应用。 -->
+  <modelVersion>4.0.0</modelVersion> <!-- Maven 模型。 -->
+  <parent><groupId>com.agent4</groupId><artifactId>agent-workbench-parent</artifactId><version>2.0.0-SNAPSHOT</version></parent> <!-- 统一版本。 -->
+  <artifactId>worker-service</artifactId> <!-- Worker 坐标。 -->
+  <dependencies> <!-- 复用执行器和数据库边界。 -->
+    <dependency><groupId>com.agent4</groupId><artifactId>backend-common</artifactId><version>${project.version}</version></dependency> <!-- 领取与结算。 -->
+    <dependency><groupId>com.agent4</groupId><artifactId>agent-core</artifactId><version>${project.version}</version></dependency> <!-- Agent 引擎。 -->
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency> <!-- 消费者验证。 -->
+  </dependencies> <!-- 结束依赖。 -->
+  <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build> <!-- 可执行打包。 -->
+</project> <!-- 结束模块。 -->

@@ -1,0 +1,17 @@
+spring: # 平台加载公共基础设施连接配置。
+  application: # 日志使用独立应用名。
+    name: platform-service # 与 Worker 区分。
+  config: # 引入依赖 JAR 中的共享配置。
+    import: classpath:application-common.yml # 统一数据库、Redis 和 RabbitMQ 参数。
+server: # 内部业务端口，外部可统一走网关。
+  port: ${PLATFORM_PORT:8081} # 不占用旧演示端口。
+  tomcat: # SSE 使用异步响应，普通线程数有上限。
+    threads: # 避免请求线程无限增长。
+      max: 100 # 本地基线，需要压测后调优。
+workbench: # 平台承担 Outbox 和租约扫描。
+  dispatcher-enabled: true # 多平台实例可以安全竞争发布租约。
+management: # 只公开健康，其余指标需要认证。
+  endpoints: # 明确允许的 Actuator 接口。
+    web: # HTTP 指标入口。
+      exposure: # 不暴露环境和配置属性。
+        include: health,metrics # 指标可用于接口时延和线程监控。

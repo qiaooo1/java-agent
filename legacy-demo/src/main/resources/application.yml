@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: agent-workbench
+
+server:
+  port: 8082
+
+# ===== Agent 引擎参数 =====
+agent:
+  model: deepseek-chat
+  base-url: https://api.deepseek.com
+  api-key: ${DEEPSEEK_API_KEY:} # 显式绑定环境变量；未配置时保留空值并进入演示模式。
+  temperature: 0.3
+  max-tokens: 2048
+  max-iterations: 10
+  tool-timeout-ms: 30000
+  memory-window-messages: 40
+  memory-window-chars: 60000
+  consecutive-failure-limit: 3
+  stream: true
+
+# ===== 持久化 =====
+storage:
+  # SQLite 数据库文件路径（相对项目根目录）
+  db-path: data/workbench.db
+
+# ===== 配额 =====
+quota:
+  # 每个会话（租户）月度 token 配额
+  monthly-token-quota: 1000000
