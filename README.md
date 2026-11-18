@@ -1,83 +1,155 @@
-# AgentWorkbench · 故障诊断与工单助手
+# AgentWorkbench｜AI 故障诊断与异步任务平台
 
-一个围绕“任务如何可靠完成”构建的 Java 后端项目：多用户权限隔离、异步任务、事务 Outbox、幂等领取、执行租约与 fencing、Redis 共享容量控制、SSE 事件补读，以及可独立部署的 Agent Worker。
+基于 **Java 17、Spring Boot、MySQL、Redis 和 RabbitMQ** 的 AI 任务平台，支持故障调查、证据引用、任务追踪与人工复核。
 
-业务主线是只读故障调查：Workflow 固定授权资源、时间和预算，Agent 在边界内自主收集证据，生成带引用的报告，再由用户确认或转交。第一版接入独立合成现场，明确区分规则演示、真实模型与生产证据；旧通用任务功能保留。先读[故障诊断模块与运行指南](docs/06-diagnosis-workflow.md)。
+项目面向内部技术支持场景：用户提交“任务持续排队”等问题，系统在指定服务、环境和时间窗口内读取健康状态、指标、日志与运维手册，生成带证据引用的调查报告，由用户确认或转交处理。
 
-这不是通过组件数量证明规模的项目。每个关键选择的依据、限制与验证方式均记录在文档中；尚未测得的 QPS 和模型效果不作承诺。
+实现重点包括 **AI 工具调用的边界控制**，以及耗时任务在重复提交、消息重投、Worker 失联和客户端断线时的可靠处理。
 
-## 从哪里开始读
+## 业务流程
 
-1. [模块阅读指南](docs/01-module-guide.md)：按一次请求的调用方向理解代码。
-2. [架构与选型记录](docs/02-architecture-and-decisions.md)：为什么选这些技术，接受了哪些代价。
-3. [API 与运行说明](docs/03-api-and-operations.md)：接口、启动、配置与故障排查。
-4. [测试、压测与效果评估](docs/04-testing-and-benchmarks.md)：区分事务正确性、平台容量和 Agent 效果。
-5. [本次验证记录](docs/05-verification.md)：实际执行结果与尚未验证的范围。
+```text
+提交故障工单 → 校验调查范围 → 异步调度 → 读取现场证据 → 生成调查报告 → 人工确认或转交
+```
 
-## 模块
+以“任务持续排队”为例，调查可读取组件健康状态、队列与容量指标、相关日志和运维手册，再把观察结果及其引用写入报告。信息不足时，报告返回待补充项，供人工继续调查。
+
+- **故障调查**：提供健康、指标、日志、手册四类只读工具，限定资源、时间窗口、调用次数和响应体积。
+- **任务工作台**：支持注册登录、异步提交、进度查看、历史事件回放和取消请求。
+- **人工复核**：报告与工单处理状态分别保存，支持确认、转交及操作留痕；建议以文本呈现，不自动执行修复。
+- **知识查询**：保留通用任务与按用户隔离的知识文档检索能力。
+
+当前诊断场景使用独立的**合成证据源**，覆盖消费者缺失、消息连接失败、执行容量已满和信息不足四类演示环境。无需模型密钥即可体验业务流程；接入真实模型后，仍在同一受控环境中调查。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    UI[浏览器工作台] -->|HTTP / JWT| GW[Gateway]
+    GW --> API[Platform]
+    API -->|任务 / 工单 / 事件 / Outbox| DB[(MySQL)]
+    API -->|发布 Outbox 通知| MQ[RabbitMQ]
+    MQ -->|任务通知| W[Worker 多实例]
+    W -->|领取 / 续约 / 结算| DB
+    GW -->|入口限流| R[(Redis)]
+    W -->|共享执行容量| R
+    W --> AG[ReAct Agent]
+    AG --> LM[模型接口 / 演示客户端]
+    AG --> T[只读诊断工具]
+    T --> E[合成证据服务]
+    API -->|SSE 事件与断线补读| UI
+```
+
+平台负责认证、工单管理和任务调度，Worker 独立执行耗时的模型与工具调用。MySQL 保存任务状态、执行权、事件和结算记录，RabbitMQ 负责异步通知，Redis 协调入口限流与跨 Worker 执行容量。
+
+当前采用共享数据库的多进程架构，Worker 支持多实例部署。
+
+## 核心设计
+
+| 需要解决的问题 | 实现方式 | 源码入口 |
+|---|---|---|
+| 创建任务成功，但发送 MQ 失败 | 任务、额度预留、初始事件和 Outbox 同事务落库；事务外发布并检查 RabbitMQ 确认与退回 | [TaskStore](backend-common/src/main/java/com/agent4/backend/TaskStore.java)、[DispatchPublisher](backend-common/src/main/java/com/agent4/backend/DispatchPublisher.java) |
+| 用户重复提交或消息重复投递 | 用户与幂等键唯一约束、输入一致性检查、数据库条件领取，以及唯一结算账本 | [任务表与约束](backend-common/src/main/resources/db/migration/V1__platform.sql)、[TaskConsumer](worker-service/src/main/java/com/agent4/worker/TaskConsumer.java) |
+| Worker 失联后恢复，旧执行者迟到写回 | 数据库租约、心跳和递增 `attemptNo` 共同校验执行权，拒绝过期执行者修改结果；失联任务有限重试 | [TaskStore](backend-common/src/main/java/com/agent4/backend/TaskStore.java) |
+| 多 Worker 同时占用用户和模型容量 | Redis Lua 与有序集合原子管理共享槽位，配合续约、过期回收和任务退避 | [RedisSlots](backend-common/src/main/java/com/agent4/backend/RedisSlots.java) |
+| 断线后丢失任务进度，或跨用户读取结果 | 事件持久化并按 `Last-Event-ID` 补读；网关与平台独立校验 JWT，资源查询校验所有者 | [TaskStreamController](platform-service/src/main/java/com/agent4/platform/api/TaskStreamController.java)、[平台 API](platform-service/src/main/java/com/agent4/platform/api) |
+| Agent 扩大调查范围或编造证据引用 | 固定资源目录、只读工具、参数与预算校验；生成报告后校验结构及本次执行的证据引用 | [DiagnosisPolicy](common-contract/src/main/java/com/agent4/contract/DiagnosisPolicy.java)、[DiagnosisWorkflow](worker-service/src/main/java/com/agent4/worker/diagnosis/DiagnosisWorkflow.java) |
+
+Workflow 负责定义调查权限、预算和报告契约；接入真实模型时，Agent 在这些边界内选择工具和调整调查过程。无密钥模式使用规则演示客户端，便于复现业务链路。
+
+详细设计与权衡见[架构与选型记录](docs/02-architecture-and-decisions.md)。
+
+## 技术栈与模块
+
+| 层次 | 技术与用途 |
+|---|---|
+| 后端与入口 | Java 17、Spring Boot 3.2.5、Spring Cloud Gateway、Spring Security、JWT |
+| 数据与迁移 | MySQL、Spring JDBC、Flyway；保存业务状态、事件和事务记录 |
+| 异步与协调 | RabbitMQ、Spring AMQP、Redis Lua；任务通知、限流与共享容量 |
+| Agent 执行 | ReAct、工具调用、OpenAI 兼容模型接口、受控只读诊断工具 |
+| 交互与部署 | 原生 JavaScript、fetch/SSE、Docker Compose |
+| 测试与自动检查 | JUnit 5、Mockito、H2、Testcontainers、GitHub Actions |
 
 | 模块 | 职责 |
 |---|---|
-| `agent-core` | 原有 ReAct、模型协议、工具、记忆窗口与抽象取消控制 |
-| `common-contract` | 任务、输入、执行配置、事件和消息协议 |
-| `backend-common` | MySQL 事务、Outbox、租约状态机、知识存储、Redis Lua 槽位 |
-| `platform-service` | 注册登录、用户资源隔离、任务与知识 API、SSE、发布与恢复调度 |
-| `worker-service` | RabbitMQ 消费、条件领取、续约、工具执行和幂等结算 |
-| `gateway-service` | 响应式代理、JWT 验证、共享入口限流 |
-| `legacy-demo` | 保留原来的 SQLite 单机工作台及测试，作为架构演进对照 |
+| `agent-core` | ReAct 执行循环、模型协议、工具注册、记忆窗口与取消信号 |
+| `common-contract` | 任务、事件、执行配置、诊断范围和跨服务协议 |
+| `backend-common` | 事务仓储、Outbox、租约状态机、额度结算与 Redis 槽位 |
+| `platform-service` | 注册登录、任务与工单 API、知识管理、SSE 和恢复调度 |
+| `worker-service` | 消费通知、领取任务、续约、Agent 执行和报告验收 |
+| `gateway-service` | 统一路由、JWT 校验与共享入口限流 |
+| `legacy-demo` | SQLite 单机版本，保留用于对照架构演进 |
 
-## 快速启动
+## 本地运行
 
-需要 Java 17、Maven 和正在运行的 Docker 引擎。根目录执行：
+### 1. 启动演示环境
 
-```powershell
-mvn -B -ntp clean package # 编译、运行回归测试并生成各服务 JAR。
-docker compose up -d --build # 启动三个中间件、平台、Worker 和网关。
-powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 # 验证完整异步链路、提交幂等与次数结算。
-```
-
-浏览器打开 `http://localhost:18080` 注册账号。未设置模型密钥时明确返回演示结果；真实调用由启动 Compose 前的 `DEEPSEEK_API_KEY` 环境变量控制。不要将真实密钥写入源码。
+准备 Java 17、Maven 和可用的 Docker Compose，在项目根目录执行：
 
 ```powershell
-$env:DEEPSEEK_API_KEY = '你的真实密钥' # 仅设置当前终端，不提交到 Git。
-docker compose up -d --force-recreate worker # 重新加载 Worker 环境配置。
-docker compose up -d --scale worker=2 # 演示多 Worker 竞争领取和共享执行容量。
+mvn -B -ntp clean package
+docker compose up -d --build
 ```
 
-平台调试端口 8081，旧演示端口 8082；MySQL 3307、Redis 6380、RabbitMQ 18073（可配置）、管理台 15673 与合成证据源 18091，仅绑定本机。
+打开 <http://localhost:18080>，注册并登录后，在故障工单区域选择演示环境、调查时间和问题描述，提交后查看执行事件与报告，再进行人工确认或转交。
 
-## 核心正确性
+默认不需要模型密钥，报告标记为 `DEMO_SCRIPT`。演示环境与工单字段说明见[故障诊断运行指南](docs/06-diagnosis-workflow.md)。
 
-- 提交：任务、次数预留、queued 事件、Outbox 在一个事务中创建。
-- 幂等：用户与请求键唯一；相同键但不同输入返回冲突。
-- 投递：数据库事务外发布，等待 broker 确认并检查无路由退回。
-- 执行：有效状态、递增 attemptNo、workerId 与数据库租约共同保护写入。
-- 取消：运行中先请求取消，Worker 检查信号并尽力中断，不能撤销外部已发生费用。
-- 结算：任务终态、唯一账本、原账期次数账户与 done 事件原子提交。
-- 恢复：租约失联使用有限重试；只开放可安全重试的计算与知识检索工具。
-- 用量：已知 token 记录在执行尝试中；失联旧尝试可补报用量，但不能改写任务结果。
-- 权限：网关与平台都验签；所有任务、事件与文档访问按认证用户过滤。
-- 事件：MySQL 是可补读的事实来源，fetch 携带 Bearer 和 Last-Event-ID。
+### 2. 可选：接入真实模型
 
-## 验证命令
+以当前配置的 DeepSeek 接口为例，在启动 Compose 的 PowerShell 中设置环境变量后重新创建 Worker：
 
 ```powershell
-mvn test # 默认离线回归；外部 Redis 在 API 契约测试中明确 Mock。
-mvn verify -Pintegration # Docker 可用时执行真实 MySQL、Redis、RabbitMQ 集成测试。
-node --check platform-service/src/main/resources/static/app.js # 前端 JavaScript 语法检查。
-node scripts/evaluate.mjs # 真实模型固定任务集评估；演示响应会被拒绝评分。
+$env:DEEPSEEK_API_KEY = '替换为你的模型密钥'
+docker compose up -d --force-recreate worker
 ```
 
-GitHub 自动检查见 [CI 工作流](.github/workflows/ci.yml)：每次推送或创建、更新 PR 时运行 Java 17 全模块构建与默认回归测试，以及前端和验证脚本的 JavaScript 语法检查。失败详情和测试报告可在仓库的 Actions 中查看。CI 不执行 Docker 集成测试或真实模型评估，检查通过不代表这些场景已验证。
+真实模型模式标记为 `REAL_MODEL`；密钥只在本地配置，不写入源码。当前两种模式都使用合成证据源，适合受控演示与后续模型评估。
 
-持续改进与实际验证记录见[维护日志](docs/maintenance-log.md)。
+### 3. 验证业务链路与多 Worker
 
-负载实验见 `scripts/load.js`。它只测提交受理，并不代表模型完成吞吐。先定义用户数、额度、限流和模型延迟，再记录可复现的数据。
+在未配置真实模型密钥的演示环境中，可运行四个诊断场景的验收脚本：
 
-## 已知边界
+```powershell
+node scripts/diagnosis-smoke.mjs
+```
 
-当前是共享数据库的多进程平台，Worker 可多实例；网关暂未实现多个平台实例的负载均衡。额度按成功任务次数，token 独立统计。检索使用特征哈希，不是预训练语义模型。固定窗口限流不保证严格平滑流量或队列公平性。外部请求无法保证取消成功，失联用量可能不完整。
+需要观察多 Worker 竞争领取和共享容量时，执行：
 
-SSE 使用有界数据库增量轮询，尚未引入 Redis Streams。固定开发依赖基线沿用原项目，公开部署前需升级与安全审计；当前提供的是可复现的学习与实验环境。
+```powershell
+docker compose up -d --scale worker=2
+```
 
-原项目说明位于 [legacy-demo/README.md](legacy-demo/README.md)，根目录 `data/` 保留且不会自动迁移。
+默认本机入口为 `18080`，平台调试端口为 `8081`，合成证据服务为 `18091`；数据库与消息组件端口及配置见 [compose.yml](compose.yml)。
+
+## 测试与验证
+
+| 验证层次 | 命令 | 覆盖范围 |
+|---|---|---|
+| 默认构建与回归 | `mvn -B -ntp verify` | 全模块构建，Agent、事务、API、Worker、网关及旧版回归 |
+| 真实中间件集成 | `mvn -B -ntp verify -Pintegration` | Docker 中的 MySQL、Redis、RabbitMQ；需要可用的 Docker 引擎 |
+| 诊断业务验收 | `node scripts/diagnosis-smoke.mjs` | Compose 演示环境中的四场景、幂等提交、资源隔离与人工处理 |
+| 前端语法 | `node --check platform-service/src/main/resources/static/app.js` | 浏览器应用的 JavaScript 语法 |
+| 真实模型评估 | `node scripts/evaluate.mjs` | 固定任务集评估；需配置真实模型，拒绝对演示响应评分 |
+
+**最近一次本地默认回归（2026-11-18）**：全模块构建成功，54 个测试通过，失败、错误与跳过均为 0；前端及八个 `.mjs` 验证脚本共九个文件通过语法检查。该次运行未启用 Docker 集成测试或真实模型评估，详见[维护日志](docs/maintenance-log.md)。
+
+[GitHub Actions 工作流](.github/workflows/ci.yml) 已配置推送、PR 和手动触发，自动执行 Java 构建、默认回归和 JavaScript 语法检查。每次云端结果以 Actions 中对应的运行记录为准，测试报告保留七天。
+
+历史中间件集成、并发幂等与 Worker 恢复实验见[实际验证记录](docs/05-verification.md)；测试分层和压测方法见[测试指南](docs/04-testing-and-benchmarks.md)。
+
+## 文档导航
+
+- [模块阅读指南](docs/01-module-guide.md)：从一次请求理解代码调用链。
+- [架构与选型记录](docs/02-architecture-and-decisions.md)：事务边界、状态流转与技术权衡。
+- [API 与运行说明](docs/03-api-and-operations.md)：接口、配置与排查方式。
+- [故障诊断指南](docs/06-diagnosis-workflow.md)：工具授权、调查预算、报告验收与业务 API。
+- [测试与评估](docs/04-testing-and-benchmarks.md) · [历史验证记录](docs/05-verification.md) · [维护日志](docs/maintenance-log.md)。
+
+## 当前范围与后续方向
+
+- **场景接入**：当前使用合成证据；下一步接入真实系统的只读观测接口，补齐资源级授权和数据脱敏。
+- **报告质量**：现有验收校验结构与引用存在性，结论由人工复核；后续建立真实模型固定评估集，检查证据支持度、信息不足时的应答、用量与时延。
+- **服务部署**：当前支持多 Worker，平台与 Worker 共享数据库；后续结合压测结果评估平台多实例路由与事件读取成本。
+
+当前仓库用于本地复现和工程实践。容量指标、模型诊断效果及公开部署条件分别验证；现有记录未提供生产吞吐或诊断准确率结论。
