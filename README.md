@@ -68,6 +68,10 @@ node --check platform-service/src/main/resources/static/app.js # 前端 JavaScri
 node scripts/evaluate.mjs # 真实模型固定任务集评估；演示响应会被拒绝评分。
 ```
 
+GitHub 自动检查见 [CI 工作流](.github/workflows/ci.yml)：每次推送或创建、更新 PR 时运行 Java 17 全模块构建与默认回归测试，以及前端和验证脚本的 JavaScript 语法检查。失败详情和测试报告可在仓库的 Actions 中查看。CI 不执行 Docker 集成测试或真实模型评估，检查通过不代表这些场景已验证。
+
+持续改进与实际验证记录见[维护日志](docs/maintenance-log.md)。
+
 负载实验见 `scripts/load.js`。它只测提交受理，并不代表模型完成吞吐。先定义用户数、额度、限流和模型延迟，再记录可复现的数据。
 
 ## 已知边界

@@ -15,6 +15,19 @@
 
 默认测试不启动 Docker，真实中间件测试名称以 IT 结尾，只有显式 integration profile 才执行。Docker 不可用时不得将它们标记为通过。H2 兼容模式不能证明所有 MySQL 锁行为。
 
+## GitHub 自动检查
+
+`.github/workflows/ci.yml` 在推送、PR 和手动触发时执行两个独立检查：
+
+- Java：Ubuntu、Temurin Java 17，运行 `mvn -B -ntp verify`，构建所有模块并执行默认回归测试。Maven 依赖按各模块 POM 缓存；Surefire 测试报告无论成功或失败均尝试保留七天。
+- JavaScript：Node.js 24，检查前端 `app.js`，以及 `scripts/`、`evaluation/` 内所有 `.mjs` 脚本的语法。只解析，不执行会访问模型、启动任务或重启 Worker 的脚本。
+
+工作流仅申请读取仓库内容的权限，不需要模型密钥。相同分支或 PR 的新运行会取消旧运行。GitHub Actions 使用固定提交版本，便于复现与审核；后续升级应同步核对版本和行为。
+
+在仓库的 Actions 中选择 CI 运行查看结果，测试报告下载项名为 `java-test-reports`。没有生成报告时给出提示，不以此替代 Maven 本身的成功或失败状态。
+
+默认自动检查不启用 `integration` profile，不启动 Compose，也不评价真实模型效果；这些场景仍按上表单独验证。Windows 本地验证与 Ubuntu 云端运行是不同环境，首次推送后应确认 Actions 的实际结果。
+
 ## 必须覆盖的故障
 
 1. 相同幂等键同时提交，只生成一个任务、一次预留、一个初始 Outbox。
