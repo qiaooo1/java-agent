@@ -14,6 +14,7 @@ import static org.mockito.Mockito.*; // 控制共享限流的返回值。
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*; // 构造认证、任务和事件请求。
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*; // HTTP 层断言。
 import static org.junit.jupiter.api.Assertions.*; // 数据与幂等断言。
+import static org.hamcrest.Matchers.containsString; // 校验协议错误仍保留支持的方法和媒体类型。
 import java.util.*; // 唯一账号和 JSON 请求。
 @SpringBootTest(properties = {"spring.datasource.url=jdbc:h2:mem:platform_api;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa", "spring.datasource.password=", "workbench.dispatcher-enabled=false", "spring.rabbitmq.dynamic=false"}) // 真实事务使用 H2，明确关闭外部消息发布。
 @AutoConfigureMockMvc // 不绕过认证和限流过滤器。
@@ -64,6 +65,22 @@ class PlatformApiTest { // 此层验证 API 契约，不能替代真实 Redis �
         String token = register(); // 使用真实认证身份。
         mvc.perform(post("/api/tasks").header("Authorization", "Bearer " + token).contentType("application/json").content("{\"goal\":\"任务\",\"maxSteps\":3}")).andExpect(status().isBadRequest()); // 缺少幂等键必须在执行前拒绝。
     } // 结束协议错误测试。
+    @Test void unsupportedMethodPreservesAllowHeader() throws Exception { // 错误 HTTP 方法属于客户端协议错误，不能被兜底处理变成 500。
+        String token = register(); // 通过真实 JWT 认证后验证 MVC 的方法匹配。
+        mvc.perform(put("/api/tasks").header("Authorization", "Bearer " + token)) // 任务集合只提供查询和提交，不支持 PUT。
+                .andExpect(status().isMethodNotAllowed()) // 保留框架定义的 405 状态。
+                .andExpect(header().string("Allow", containsString("GET"))) // 告诉客户端该资源支持查询。
+                .andExpect(header().string("Allow", containsString("POST"))) // 告诉客户端该资源支持提交。
+                .andExpect(jsonPath("$.message").value("请求方法不受支持")); // 继续使用统一的错误响应结构。
+    } // 结束请求方法协议测试。
+    @Test void unsupportedContentTypeIsClientErrorWithoutReservingQuota() throws Exception { // 不支持的请求体格式不能误报成服务器故障或创建任务。
+        String token = register(); // 每个测试使用独立账户检查额度副作用。
+        mvc.perform(post("/api/tasks").header("Authorization", "Bearer " + token).header("Idempotency-Key", "unsupported-content-type").contentType("text/plain").content("not-json")) // Submit 需要受支持的结构化请求体。
+                .andExpect(status().isUnsupportedMediaType()) // 保留框架定义的 415 状态。
+                .andExpect(header().string("Accept", containsString("application/json"))) // 返回框架支持的请求体媒体类型。
+                .andExpect(jsonPath("$.message").value("请求内容类型不受支持")); // 不向客户端暴露内部转换器异常。
+        mvc.perform(get("/api/quota").header("Authorization", "Bearer " + token)).andExpect(status().isOk()).andExpect(jsonPath("$.reservedTasks").value(0)); // 解析失败应发生在提交事务之前。
+    } // 结束请求内容类型协议测试。
     @Test void invalidInputAndSharedRateLimitAreVisible() throws Exception { // 客户端错误不能变成后台失败任务。
         String token = register(); // 获取有效身份。
         mvc.perform(post("/api/tasks").header("Authorization", "Bearer " + token).header("Idempotency-Key", "bad").contentType("application/json").content("{\"goal\":\" \",\"maxSteps\":3}")).andExpect(status().isBadRequest()); // 空目标明确拒绝。
