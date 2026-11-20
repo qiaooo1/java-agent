@@ -17,20 +17,24 @@ public class DispatchPublisher { // 在数据库事务外等待网络确认。
     public DispatchPublisher(OutboxStore outbox, TaskStore tasks, RabbitTemplate rabbit, ObjectMapper json) { this.outbox = outbox; this.tasks = tasks; this.rabbit = rabbit; this.json = json; } // 构造器注入，方便故障测试替换客户端。
     @Scheduled(fixedDelayString = "${workbench.publish-delay-ms:500}") // 上一批完成后再等待，避免同实例无限积压调度线程。
     public void publish() { // 每批最多处理二十条待发通知。
-        for (String id : outbox.ready()) outbox.claim(id).ifPresent(event -> { // 条件领取失败时跳过。
-            try { // 确认失败、超时与无路由均进入重试。
-                CorrelationData correlation = new CorrelationData(event.id()); // 将确认绑定至 Outbox 标识。
-                Message message = MessageBuilder.withBody(json.writeValueAsBytes(new Dispatch(1, event.taskId(), event.traceId()))).setContentType("application/json").setDeliveryMode(MessageDeliveryMode.PERSISTENT).setMessageId(event.id()).setHeader("traceId", event.traceId()).build(); // 持久化 JSON 消息带完整追踪信息。
-                rabbit.send(BackendConfiguration.EXCHANGE, "execute", message, correlation); // 此时没有持有业务事务和任务行锁。
-                var confirm = correlation.getFuture().get(5, TimeUnit.SECONDS); // 有界等待 broker 发布确认。
-                if (!confirm.isAck() || correlation.getReturned() != null) throw new IllegalStateException("消息被拒绝或没有可路由队列"); // 发布确认不等同于路由成功。
-                outbox.sent(event); // 仅成功确认后标记已发送。
-            } catch (Exception e) { // 进程崩溃则由发布租约过期接管。
-                if (e instanceof InterruptedException) Thread.currentThread().interrupt(); // 保留应用停止信号。
-                outbox.failed(event, e); // 失败信息和重试时间持久化。
-                log.warn("dispatch_failed taskId={} traceId={}", event.taskId(), event.traceId(), e); // 不输出用户密码或模型密钥。
-            } // 完成单消息发送。
-        }); // 完成一批发送。
+        if (Thread.currentThread().isInterrupted()) return; // 已收到停止信号时不开始数据库扫描，检查本身不清除标记。
+        for (String id : outbox.ready()) { // 批次间也检查停止信号，避免确认中断后继续领取其他消息。
+            if (Thread.currentThread().isInterrupted()) return; // 未领取的候选记录留待后续发布器处理。
+            outbox.claim(id).ifPresent(event -> { // 条件领取失败时跳过。
+                try { // 确认失败、超时与无路由均进入重试。
+                    CorrelationData correlation = new CorrelationData(event.id()); // 将确认绑定至 Outbox 标识。
+                    Message message = MessageBuilder.withBody(json.writeValueAsBytes(new Dispatch(1, event.taskId(), event.traceId()))).setContentType("application/json").setDeliveryMode(MessageDeliveryMode.PERSISTENT).setMessageId(event.id()).setHeader("traceId", event.traceId()).build(); // 持久化 JSON 消息带完整追踪信息。
+                    rabbit.send(BackendConfiguration.EXCHANGE, "execute", message, correlation); // 此时没有持有业务事务和任务行锁。
+                    var confirm = correlation.getFuture().get(5, TimeUnit.SECONDS); // 有界等待 broker 发布确认。
+                    if (!confirm.isAck() || correlation.getReturned() != null) throw new IllegalStateException("消息被拒绝或没有可路由队列"); // 发布确认不等同于路由成功。
+                    outbox.sent(event); // 仅成功确认后标记已发送。
+                } catch (Exception e) { // 进程崩溃则由发布租约过期接管。
+                    if (e instanceof InterruptedException) Thread.currentThread().interrupt(); // 恢复等待操作清除的停止标记，由外层循环结束本批。
+                    outbox.failed(event, e); // 当前消息的失败信息和重试时间仍需持久化。
+                    log.warn("dispatch_failed taskId={} traceId={}", event.taskId(), event.traceId(), e); // 不输出用户密码或模型密钥。
+                } // 完成单消息发送。
+            }); // 完成当前候选消息的发布处理。
+        } // 完成一批发送。
     } // 结束发布任务。
     @Scheduled(fixedDelay = 5000) // 租约恢复不依赖 RabbitMQ 是否在线。
     public void recover() { // 多实例恢复时由任务行锁确定唯一状态转换。

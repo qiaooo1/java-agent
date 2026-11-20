@@ -66,3 +66,28 @@
 ### 提交建议
 
 `修复请求方法与内容类型错误被误报为服务器异常`
+
+## 2026-11-20：收到线程中断后及时停止 Outbox 发布批次
+
+### 问题与改进
+
+`DispatchPublisher.publish()` 在等待 RabbitMQ 确认时捕获 `InterruptedException`，虽然恢复了线程中断标记，但外层批次没有检查标记，仍会继续领取、发送后续候选消息。进入方法前已被中断的线程也会开始扫描待发记录，增加停机期间的无效工作与未确认消息。
+
+在发布入口和每条候选消息领取前使用 `isInterrupted()` 检查停止信号，及时结束本批且不清除标记。已开始的消息沿用失败记录与重试处理，未领取的消息留待后续发布运行。普通 broker NACK 不等同于线程中断，仍允许继续处理其他候选。
+
+新增发布前中断、确认等待期间中断、普通拒绝后继续发布三个回归场景。测试在调用线程中确定性设置中断、控制确认 future，不依赖休眠、外部 broker 或竞争时序；通过 finally 清理测试线程的中断状态。运维文档同步说明批次停止与至少一次投递的边界。
+
+### 验证
+
+- 修复前运行五个发布器测试，新增的发布前中断、确认等待中断两项失败；其余三项通过。分别观察到中断后仍扫描、仍领取第二条消息。日志：`target/daily-publisher-interrupt-before.log`。
+- 修复后运行 `mvn -o -B -ntp -pl backend-common -am test -Dtest=DispatchPublisherTest -Dsurefire.failIfNoSpecifiedTests=false`，五个测试全部通过，失败、错误、跳过均为 0。日志：`target/daily-publisher-interrupt-after.log`。
+- 测试进程的 `TEMP`、`TMP` 和 `java.io.tmpdir` 指向项目忽略目录 `target/java-tmp`，未修改 Maven 配置。
+- `git diff --check`：通过。本次执行发布器定向单元回归，未重跑全量测试、真实 RabbitMQ 集成测试、实际进程停机验收或 GitHub 云端检查。
+
+### 设计说明
+
+Java 线程中断是协作式停止信号。捕获 `InterruptedException` 后恢复标记，还需要让外层控制流停止接收新工作；检查时使用不清除标记的 `isInterrupted()`。确认等待中断不表示 broker 未收到消息，因此重试仍依赖任务领取和结算幂等，不能宣称撤回消息或恰好一次投递。
+
+### 提交建议
+
+`修复消息发布器中断后仍继续发送的问题`
