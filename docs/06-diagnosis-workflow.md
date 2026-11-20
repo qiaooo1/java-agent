@@ -6,7 +6,9 @@
 
 Workflow 固定调查资源、时间窗口、工具权限、预算、报告契约及人工交接条件。Agent 在边界内自主决定先查什么、如何根据证据调整假设、何时结束并请求补充信息。系统没有把调查顺序硬编码为唯一流程；无密钥演示客户端是一个例外，它是用于验证链路的有限规则脚本。
 
-链路：提交工单 → 范围校验与事务创建 → Outbox 与 MQ → Worker 领取 → 自主调查 → 报告结构与引用验收 → 事务结算 → 人工确认或转交。
+链路：提交工单 → 范围校验与事务创建 → Outbox 与 MQ → Worker 领取 → Harness 授权与预算门禁 → 自主调查 → Workflow 报告验收 → 事务结算 → 人工确认或转交。
+
+`DiagnosisWorkflow` 实现通用 `HarnessWorkflow` 契约，提供不可变策略、固定范围提示词及报告验收。`DiagnosisTools` 只负责资源级校验、受控读取和证据记录；包括未知工具与错误参数在内的调用次数统一由 Harness 计数，不再由 Worker 的事件监听器维护。业务适配方式见 [Harness 设计](07-harness.md)。
 
 任务 `SUCCEEDED` 仅表示成功生成通过硬约束检查的报告，不表示诊断正确或故障已经修复。报告 outcome 为 `NEEDS_REVIEW` 或 `NEEDS_INFORMATION`。工单人工状态单独使用 `PENDING`、`CONFIRMED`、`ESCALATED`；确认表示已阅，转交只记录交接决定，不发送消息给外部人员，也不自动执行修复。
 

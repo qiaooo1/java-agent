@@ -2,7 +2,7 @@
 
 本项目的业务主线是“多用户提交耗时 AI 任务，平台可靠调度，执行结果可回看”。先理解一个任务，再理解多个实例之间的协作。
 
-当前业务入口已聚焦故障诊断与工单。理解通用任务链后，按[诊断模块指南](06-diagnosis-workflow.md)阅读范围策略、只读工具、报告验收和人工交接，区分 Workflow 的边界与 Agent 的自主调查。
+当前业务入口已聚焦故障诊断与工单。执行链先阅读 [Harness 设计](07-harness.md)中的上下文、策略和运行入口，再按[诊断模块指南](06-diagnosis-workflow.md)阅读范围策略、只读工具、报告验收和人工交接。
 
 ## 推荐阅读顺序
 
@@ -21,11 +21,11 @@
 
 ## 模块职责
 
-- **agent-core**：原项目提取的执行引擎。认识模型协议和工具，不认识 MySQL、Redis、MQ。取消通过抽象信号传入。
+- **agent-core**：`AgentHarness` 统一工具授权、调用预算、运行截止时间和结果验收；`ReActAgent` 负责交互循环，`ToolExecutor` 隔离工具实现。不依赖 MySQL、Redis、MQ，取消通过抽象信号传入。
 - **common-contract**：跨服务 DTO 与状态枚举，只依赖 JDK。输入快照和服务端执行配置分别保存。
 - **backend-common**：共享数据库与事务规则、知识存储、Redis 槽位、Outbox。当前是共享数据库的多进程架构，并非独立数据库微服务。
 - **platform-service**：注册登录、身份校验、任务与知识 API、SSE、Outbox 调度及租约恢复。不直接执行模型任务。
-- **worker-service**：消费、申请共享容量、条件领取、续约、执行、补报用量和完成结算。没有用户 HTTP 端口。
+- **worker-service**：消费、申请共享容量、条件领取、续约，装配 `DiagnosisWorkflow` 或 `SafeTaskWorkflow` 后调用 Harness，再完成用量与结果结算。没有用户 HTTP 端口。
 - **gateway-service**：路由、JWT 校验、Redis 入口限流。平台仍然独立验签，不能伪造请求头绕过权限。
 - **legacy-demo**：原有 SQLite 演示，便于与多进程版本对照；原数据仍留在根目录 `data/`，不会自动迁移或删除。
 

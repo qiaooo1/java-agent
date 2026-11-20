@@ -1,7 +1,7 @@
 package com.agent4.worker.diagnosis; // 使用真实 HTTP 适配器与 ReAct 循环验证边界。
 import com.agent4.contract.Contracts.DiagnosisScope; // 与真实工单使用相同范围。
 import com.agent4.agent.*; // 运行正式 Agent 引擎。
-import com.agent4.llm.ToolCall; // 监听每次工具调用以扣减预算。
+import com.agent4.harness.*; // 验证诊断通过正式 Harness 的治理与验收路径。
 import com.agent4.tool.ToolRegistry; // 经过正式反射与参数解析。
 import com.agent4.util.Json; // 读取实际报告。
 import com.sun.net.httpserver.HttpServer; // 本机临时证据服务，无需真实模型或中间件。
@@ -11,6 +11,7 @@ import org.junit.jupiter.params.provider.ValueSource; // 固定案例可复现�
 import java.net.InetSocketAddress; // 操作系统分配空闲端口。
 import java.nio.charset.StandardCharsets; // 中文 JSON 使用 UTF-8。
 import java.util.*; // 合成观测不携带真实故障结论。
+import java.time.Duration; // 使用与生产适配器相同的执行阶段时限。
 import static org.junit.jupiter.api.Assertions.*; // 校验行为与安全约束。
 class DiagnosisWorkflowTest { // 模拟模型只证明链路和约束，不能证明模型效果。
     HttpServer source; String url; int requests; boolean redirect; // 每个测试隔离计数与响应。
@@ -28,12 +29,12 @@ class DiagnosisWorkflowTest { // 模拟模型只证明链路和约束，不能�
     } // 完成证据源启动。
     @AfterEach void stop() { source.stop(0); } // 不保留后台服务。
     @ParameterizedTest @ValueSource(strings = {"demo-a", "demo-b", "demo-c", "demo-d"}) void scopedInvestigationProducesCitedReport(String environment) { // 覆盖三类故障及信息不足。
-        DiagnosisTools tools = new DiagnosisTools(scope(environment), url, 2); ToolRegistry registry = new ToolRegistry().register(tools); // 正式工具 Schema 与反射执行。
+        DiagnosisWorkflow workflow = new DiagnosisWorkflow(scope(environment), url, 2, "DEMO_SCRIPT", Duration.ofSeconds(30)); ToolRegistry registry = new ToolRegistry().register(workflow.tools()); // 业务适配器绑定工具与正式报告验收。
         try { // 无论断言是否通过都关闭工具线程池。
-            ReActAgent agent = new ReActAgent(new DiagnosisDemoClient(), registry, AgentConfig.builder().maxIterations(8).build(), DiagnosisWorkflow.PROMPT); // 使用正式 Workflow 指令。
-            agent.setListener(new AgentListener() { @Override public void onActionStart(ToolCall call) { tools.beforeCall(); } }); // 所有调用都计入预算。
-            AgentTrace trace = agent.run("调查任务排队，禁止修改系统"); assertEquals(AgentTrace.Status.COMPLETED, trace.status()); // 真正走完多轮工具调用。
-            var result = Json.parse(DiagnosisWorkflow.accept(trace.finalAnswer(), scope(environment), tools.evidence(), "DEMO_SCRIPT")); // 经过正式报告验收。
+            HarnessRequest request = new HarnessRequest(new HarnessContext("incident", "trace", 2), "调查任务排队，禁止修改系统", AgentConfig.builder().maxIterations(8).build(), workflow); // 运行身份和规则与正式 Worker 一致。
+            HarnessResult run = new AgentHarness().run(request, new DiagnosisDemoClient(), registry, null, () -> false); // 治理、工具循环和业务验收由统一入口串联。
+            assertTrue(run.successful(), run.error()); assertEquals(4, run.toolCalls()); // 实际成功必须包含报告验收，不仅是模型输出完成。
+            var result = Json.parse(run.answer()); // 使用验收后的正式报告。
             assertEquals(4, requests); assertEquals(4, result.path("evidence").size()); assertEquals("A2-E1", result.path("evidence").get(0).path("id").asText()); // 来源和尝试编号可追溯。
             assertEquals(environment.equals("demo-d") ? "NEEDS_INFORMATION" : "NEEDS_REVIEW", result.path("report").path("outcome").asText()); // 信息不足不会强行给确定结论。
             String expected = environment.equals("demo-a") ? "消费者数量为零" : environment.equals("demo-b") ? "消息连接失败" : environment.equals("demo-c") ? "执行名额已占满" : "无法确定"; // 规则脚本必须根据观测走不同路径。
@@ -45,7 +46,6 @@ class DiagnosisWorkflowTest { // 模拟模型只证明链路和约束，不能�
         assertThrows(IllegalArgumentException.class, () -> new DiagnosisTools(new DiagnosisScope("demo-workbench", null, scope("demo-a").from(), scope("demo-a").to()), url, 1)); // 缺少环境字段也应明确拒绝。
         DiagnosisTools tools = new DiagnosisTools(scope("demo-a"), url, 1); // 合法任务仍不能绕过组件白名单。
         assertThrows(IllegalArgumentException.class, () -> tools.logs("http://127.0.0.1/private", "")); assertEquals(0, requests); // 恶意参数不触发网络访问。
-        for (int i = 0; i < 12; i++) tools.beforeCall(); assertThrows(IllegalStateException.class, tools::beforeCall); // 工具预算不可无限延长。
     } // 结束资源边界测试。
     @Test void redirectIsNotFollowed() { // 不信任证据源返回的其他地址。
         redirect = true; assertThrows(IllegalStateException.class, () -> new DiagnosisTools(scope("demo-a"), url, 1).health()); assertEquals(1, requests); // 只请求固定来源一次。

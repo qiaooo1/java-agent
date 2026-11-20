@@ -1,10 +1,10 @@
-# AgentWorkbench｜AI 故障诊断与异步任务平台
+# IncidentHarness｜故障诊断与工单平台
 
-基于 **Java 17、Spring Boot、MySQL、Redis 和 RabbitMQ** 的 AI 任务平台，支持故障调查、证据引用、任务追踪与人工复核。
+面向故障调查的 **Agent Harness**，将工具授权、执行预算、取消控制、事件记录和报告验收组织为统一运行链路，支持异步诊断、证据引用与人工复核。
 
 项目面向内部技术支持场景：用户提交“任务持续排队”等问题，系统在指定服务、环境和时间窗口内读取健康状态、指标、日志与运维手册，生成带证据引用的调查报告，由用户确认或转交处理。
 
-实现重点包括 **AI 工具调用的边界控制**，以及耗时任务在重复提交、消息重投、Worker 失联和客户端断线时的可靠处理。
+故障诊断与通用任务通过同一个 Harness 执行入口接入。底层复用 Spring Boot、MySQL、Redis 和 RabbitMQ，处理重复提交、消息重投、Worker 失联和客户端断线等后端问题。
 
 ## 业务流程
 
@@ -33,7 +33,8 @@ flowchart LR
     W -->|领取 / 续约 / 结算| DB
     GW -->|入口限流| R[(Redis)]
     W -->|共享执行容量| R
-    W --> AG[ReAct Agent]
+    W --> H[AgentHarness 运行治理]
+    H --> AG[ReAct Agent]
     AG --> LM[模型接口 / 演示客户端]
     AG --> T[只读诊断工具]
     T --> E[合成证据服务]
@@ -43,6 +44,18 @@ flowchart LR
 平台负责认证、工单管理和任务调度，Worker 独立执行耗时的模型与工具调用。MySQL 保存任务状态、执行权、事件和结算记录，RabbitMQ 负责异步通知，Redis 协调入口限流与跨 Worker 执行容量。
 
 当前采用共享数据库的多进程架构，Worker 支持多实例部署。
+
+## Harness 如何运行
+
+1. **建立执行上下文**：Worker 从任务快照创建 `HarnessContext`，绑定任务、追踪标识和执行尝试编号。
+2. **装配业务策略**：`DiagnosisWorkflow` 提供诊断工具白名单、十二次调用预算、调查指令和报告验收；`SafeTaskWorkflow` 保留计算及知识查询等通用任务。
+3. **统一执行门禁**：`AgentHarness` 过滤模型可见的工具，并在实际调用入口检查授权、预算、取消和截止时间。未知工具和参数错误同样消耗调用预算，工具等待受剩余执行时间约束。
+4. **验收正式结果**：模型循环完成后调用业务 `accept`；报告引用或格式不合规时不发布正式答案，已知模型用量仍保留。
+5. **记录并结算**：Worker 持久化 `harness` 阶段事件与实际调用次数，随后按原有租约与幂等事务完成结算和消息确认。
+
+运行治理位于 [`agent-core` 的 `harness` 包](agent-core/src/main/java/com/agent4/harness)，不依赖 Spring、数据库或 MQ。业务通过 `HarnessWorkflow` 扩展，工具通过 `ToolExecutor` 接入，ReAct 继续负责模型与工具交互循环。流式增量属于过程数据，正式结果事件在验收后发出。
+
+当前失联恢复仍是从持久化输入重新执行一次任务，尚未实现对话或工具执行的中途检查点恢复。运行层负责阻止到期后的新工作与正式结果发布；阻塞调用由工具超时和 Worker 心跳尽力中断。详细接口和边界见 [Harness 设计与接入指南](docs/07-harness.md)。
 
 ## 核心设计
 
@@ -72,11 +85,11 @@ Workflow 负责定义调查权限、预算和报告契约；接入真实模型�
 
 | 模块 | 职责 |
 |---|---|
-| `agent-core` | ReAct 执行循环、模型协议、工具注册、记忆窗口与取消信号 |
+| `agent-core` | Harness 运行治理、ReAct 循环、模型协议、工具执行接口与记忆窗口 |
 | `common-contract` | 任务、事件、执行配置、诊断范围和跨服务协议 |
 | `backend-common` | 事务仓储、Outbox、租约状态机、额度结算与 Redis 槽位 |
 | `platform-service` | 注册登录、任务与工单 API、知识管理、SSE 和恢复调度 |
-| `worker-service` | 消费通知、领取任务、续约、Agent 执行和报告验收 |
+| `worker-service` | 消费通知、租约续约、业务适配器装配、Harness 接入与事务结算 |
 | `gateway-service` | 统一路由、JWT 校验与共享入口限流 |
 | `legacy-demo` | SQLite 单机版本，保留用于对照架构演进 |
 
@@ -132,7 +145,7 @@ docker compose up -d --scale worker=2
 | 前端语法 | `node --check platform-service/src/main/resources/static/app.js` | 浏览器应用的 JavaScript 语法 |
 | 真实模型评估 | `node scripts/evaluate.mjs` | 固定任务集评估；需配置真实模型，拒绝对演示响应评分 |
 
-**最近一次本地默认回归（2026-11-18）**：全模块构建成功，54 个测试通过，失败、错误与跳过均为 0；前端及八个 `.mjs` 验证脚本共九个文件通过语法检查。该次运行未启用 Docker 集成测试或真实模型评估，详见[维护日志](docs/maintenance-log.md)。
+**最近一次本地默认回归（2026-11-20）**：全模块构建成功，12 个测试套件、68 个测试通过，失败、错误与跳过均为 0。包括 Harness 工具授权、预算、取消、截止时间与验收边界，以及通过 Harness 执行的四个诊断场景。该次运行未启用 Docker 集成测试或真实模型评估，详见[维护日志](docs/maintenance-log.md)。
 
 [GitHub Actions 工作流](.github/workflows/ci.yml) 已配置推送、PR 和手动触发，自动执行 Java 构建、默认回归和 JavaScript 语法检查。每次云端结果以 Actions 中对应的运行记录为准，测试报告保留七天。
 
@@ -144,6 +157,7 @@ docker compose up -d --scale worker=2
 - [架构与选型记录](docs/02-architecture-and-decisions.md)：事务边界、状态流转与技术权衡。
 - [API 与运行说明](docs/03-api-and-operations.md)：接口、配置与排查方式。
 - [故障诊断指南](docs/06-diagnosis-workflow.md)：工具授权、调查预算、报告验收与业务 API。
+- [Harness 设计与接入指南](docs/07-harness.md)：运行契约、治理边界和业务扩展方式。
 - [测试与评估](docs/04-testing-and-benchmarks.md) · [历史验证记录](docs/05-verification.md) · [维护日志](docs/maintenance-log.md)。
 
 ## 当前范围与后续方向

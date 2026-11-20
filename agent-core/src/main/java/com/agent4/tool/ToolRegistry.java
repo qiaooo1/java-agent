@@ -23,7 +23,7 @@ import java.util.concurrent.TimeoutException; // 超时后取消任务并回传�
  * <p>核心设计 —— {@link #invoke} 永不向上抛异常：任何失败（未知工具、JSON 解析失败、
  * 缺参、执行异常、超时）都转为错误字符串作为 Observation 回传，让 Agent 能自愈重试。</p>
  */
-public final class ToolRegistry { // 单一注册中心，final 防止子类改写入口语义。
+public final class ToolRegistry implements ToolExecutor { // 注册中心可由 Harness 组合治理，不允许子类绕过原有校验。
 
     private final Map<String, ToolSpec> tools = new LinkedHashMap<>(); // 有序注册表，重名在写入时即被拒绝。
     private final ExecutorService executor; // 工具在独立线程执行，避免阻塞 Agent 主循环。

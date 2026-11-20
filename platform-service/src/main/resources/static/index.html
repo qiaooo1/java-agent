@@ -3,12 +3,12 @@
 <head> <!-- 页面元数据与样式。 -->
   <meta charset="UTF-8"> <!-- 保证中文事件和工具结果正确显示。 -->
   <meta name="viewport" content="width=device-width,initial-scale=1"> <!-- 支持窄屏。 -->
-  <title>AgentWorkbench · 故障诊断与工单</title> <!-- 保留项目名称并明确业务场景。 -->
+  <title>IncidentHarness · 故障诊断与工单</title> <!-- 项目名称与实际业务保持一致。 -->
   <link rel="stylesheet" href="/styles.css"> <!-- 样式独立成文件，便于按模块阅读。 -->
   <script src="/app.js" defer></script> <!-- 交互逻辑不混入 HTML。 -->
 </head> <!-- 结束页面头。 -->
 <body> <!-- 所有动态文本均由 JavaScript 使用 textContent 渲染。 -->
-  <header><div><small>AGENT WORKBENCH / SUPPORT</small><h1>让故障调查有据可查。</h1><p>限定调查范围 · 逐步收集证据 · 人工确认结论</p></div><button id="logout" hidden>退出登录</button></header> <!-- 用户先看到业务价值。 -->
+  <header><div><small>INCIDENT HARNESS / SUPPORT</small><h1>让故障调查有据可查。</h1><p>限定调查范围 · 逐步收集证据 · 人工确认结论</p></div><button id="logout" hidden>退出登录</button></header> <!-- 用户先看到业务价值。 -->
   <main> <!-- 登录前后共用同一页面。 -->
     <section id="auth" class="panel auth"><small>开始使用</small><h2>你的 AI 任务工作台</h2><p>创建账号后，任务、文档和执行记录仅对自己可见。</p><form id="authForm"><label>用户名<input id="username" autocomplete="username" pattern="[a-zA-Z0-9_]{3,32}" required placeholder="3—32 位字母、数字或下划线"></label><label>密码<input id="password" type="password" autocomplete="current-password" minlength="8" maxlength="64" required placeholder="至少 8 位"></label><div class="actions"><button value="login" type="submit">登录</button><button value="register" type="submit" class="secondary">注册账号</button></div></form></section> <!-- 访问令牌只保存在内存，刷新页面后重新登录。 -->
     <div id="workspace" hidden> <!-- 已登录用户的功能区。 -->

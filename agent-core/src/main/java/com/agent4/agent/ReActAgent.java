@@ -5,7 +5,7 @@ import com.agent4.llm.ChatRequest; // 请求封装把窗口消息、工具清单
 import com.agent4.llm.ChatResponse; // 读取响应中的用量用于轨迹统计。
 import com.agent4.llm.LLMClient; // 具体客户端由上层注入，引擎不感知 HTTP 与鉴权细节。
 import com.agent4.llm.ToolCall; // 工具调用仅作为数据载体，携带名称、参数与配对 id。
-import com.agent4.tool.ToolRegistry; // 注册表负责 schema 与超时执行，引擎不直接碰具体工具。
+import com.agent4.tool.ToolExecutor; // 执行器负责声明与调用，可由 Harness 增加权限和预算。
 
 import java.util.ArrayList; // 仅需可增长列表收集本轮的多个工具步骤。
 import java.util.List; // 对外仍返回 List，内部用 ArrayList 累积。
@@ -47,17 +47,17 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
             """; // 固定系统提示词：约束 ReAct 行为与工具使用方式，文本块内部不能插入行注释，故整块说明放在结束处。
 
     private final LLMClient llm; // 模型客户端是唯一的外部可变依赖，其余字段在构造后不变。
-    private final ToolRegistry tools; // 工具注册表只暴露 schema 与调用入口。
+    private final ToolExecutor tools; // 不依赖注册表实现，允许注入受控工具执行器。
     private final AgentConfig config; // 配置在构造时固化，运行期不改变行为边界。
     private final String systemPrompt; // 业务 Workflow 可以注入固定指令，用户目标不能改写此字段。
     private final SlidingWindowMemory memory; // 每个引擎实例独占一份记忆，会话之间不会串上下文。
     private volatile AgentListener listener = new AgentListener() { // volatile 保证跨线程替换监听器时立即可见。
     }; // 默认空实现，使回调前不必判空。
 
-    public ReActAgent(LLMClient llm, ToolRegistry tools, AgentConfig config) { // 构造时按配置创建记忆窗口，窗口预算此后不可变。
+    public ReActAgent(LLMClient llm, ToolExecutor tools, AgentConfig config) { // 旧注册表仍实现该接口，调用方保持源码兼容。
         this(llm, tools, config, SYSTEM_PROMPT); // 旧入口保持默认助手行为。
     } // 结束兼容构造。
-    public ReActAgent(LLMClient llm, ToolRegistry tools, AgentConfig config, String systemPrompt) { // 业务入口固定任务边界，而非固定调查顺序。
+    public ReActAgent(LLMClient llm, ToolExecutor tools, AgentConfig config, String systemPrompt) { // 业务入口固定任务边界，而非固定调查顺序。
         this.llm = llm; // 保存客户端引用供每轮 Reason 使用。
         this.tools = tools; // 保存工具注册表，Act 阶段据此执行。
         this.config = config; // 保存不可变配置，循环各处的上限都从这里读取。

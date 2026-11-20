@@ -14,12 +14,10 @@ public final class DiagnosisTools { // 实例只能服务一个任务尝试。
     private final URI base; // 固定实验服务，不接受用户输入 URL。
     private final String prefix; // 证据标识包含执行编号，避免跨尝试混淆。
     private final List<JsonNode> evidence = new ArrayList<>(); // 最终报告必须引用实际读到的证据。
-    private int calls; // 限制所有工具调用，包括未知工具与错误参数。
     public DiagnosisTools(DiagnosisScope scope, String baseUrl, int attempt) { // 执行前再次检查范围。
         DiagnosisPolicy.validate(scope); this.scope = scope; this.base = URI.create(baseUrl); this.prefix = "A" + attempt + "-E"; // 不从用户问题推导地址。
         if (!Set.of("http", "https").contains(base.getScheme()) || base.getHost() == null || base.getUserInfo() != null || base.getQuery() != null || base.getFragment() != null || !Set.of("", "/").contains(base.getPath())) throw new IllegalArgumentException("证据源必须是无凭据和路径的服务端地址"); // 限定适配器配置形状。
     } // 结束固定范围构造。
-    public synchronized void beforeCall() { if (++calls > DiagnosisPolicy.MAX_CALLS) throw new IllegalStateException("调查工具调用预算已用尽，请转人工"); } // 由执行监听器在所有工具调用之前执行。
     public synchronized List<JsonNode> evidence() { return List.copyOf(evidence); } // 不允许报告层修改采集记录。
     @Tool(name = "read_health", description = "读取已授权环境全部组件的健康快照；无参数。返回的是演示证据，不代表生产状态。") // 健康检查先后由 Agent 决定。
     public JsonNode health() { return read("health", "all", ""); } // 服务和时间来自固定 scope。

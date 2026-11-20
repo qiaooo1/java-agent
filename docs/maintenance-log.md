@@ -91,3 +91,34 @@ Java 线程中断是协作式停止信号。捕获 `InterruptedException` 后恢
 ### 提交建议
 
 `修复消息发布器中断后仍继续发送的问题`
+
+## 2026-11-20：改造 IncidentHarness 统一运行层
+
+### 问题与改进
+
+项目原有 ReAct 循环与可靠任务后端，但 Worker 同时装配模型、维护诊断工具调用计数和验收报告，通用任务与诊断的执行治理边界不统一。
+
+项目展示名称改为 **IncidentHarness｜故障诊断与工单平台**。在 `agent-core` 新增不依赖 Spring、数据库或 MQ 的 `harness` 包，提供运行上下文、不可变策略、业务扩展点、统一请求和结果。新增 `ToolExecutor` 接口，ReAct 面向该接口，原有 `ToolRegistry` 继续兼容。
+
+`AgentHarness` 在模型声明与真实调用两处实施工具白名单，统一扣减未知、未授权和参数错误调用的预算，检查取消与截止时间，并将工具等待限制为剩余运行预算。每次运行独立创建记忆与计数，正式结果只在业务验收通过后发出，失败仍保留已知用量。
+
+`DiagnosisWorkflow` 与 `SafeTaskWorkflow` 通过相同接口接入。诊断适配器绑定范围、工具和证据，保留十二次预算及原有报告验收；通用任务的调用预算为步数上限乘四。Worker 改为建立 Harness 请求、记录运行边界及验收事件，再使用原有租约、fencing 和幂等事务结算与 ACK。旧单机演示保持原有调用入口。
+
+同步更新 README、工作台展示名称、模块与诊断指南，新增 `docs/07-harness.md`；GitHub 仓库地址、数据库结构、Compose 资源名称未更改。
+
+### 验证
+
+- `mvn -o -B -ntp -pl worker-service -am compile`：相关模块编译通过。
+- 定向运行 `AgentHarnessTest`、`DiagnosisWorkflowTest`、`TaskConsumerTest`：18 个测试通过，包括新增的八个 Harness 核心场景及一个 Worker 接线场景。
+- `mvn -o -B -ntp verify`：八个 reactor 项目全部成功；12 个测试套件共 68 个测试，失败、错误、跳过均为 0。日志：`target/harness-full-verify.log`。
+- 四个诊断环境通过统一 Harness、真实本机 HTTP 工具与正式报告验收，仍使用模拟模型和合成证据，不代表真实模型诊断准确率。
+- 检查本次 README 及模块、诊断、Harness 指南的 42 个本地链接，全部目标存在；Markdown 代码围栏成对。工作台原有 35 个元素 ID 保持完整。
+- `git diff --check`：通过。未运行 Docker 中间件集成、真实供应商评估、浏览器视觉验收或 GitHub 云端检查，也未重新部署本地容器。
+
+### 设计边界
+
+Harness 负责运行门禁与业务验收；Worker 负责资源生命周期、租约和持久化。恢复仍是从任务快照重新执行，不具备对话中间检查点恢复。截止时间检查不能强制撤销阻塞调用和外部已发生费用，报告引用校验也不等于结论正确。
+
+### 提交建议
+
+`将项目改造为 IncidentHarness 并统一执行治理与报告验收`

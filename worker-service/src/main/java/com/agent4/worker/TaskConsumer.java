@@ -3,6 +3,7 @@ import com.agent4.backend.*; // 共享租约、槽位和知识访问规则。
 import com.agent4.contract.Contracts.*; // 使用版本化消息协议。
 import com.agent4.contract.Contracts; // 统一终态判断。
 import com.agent4.agent.*; // 复用 Agent 引擎和事件回调。
+import com.agent4.harness.*; // 所有任务经过统一运行上下文、策略门禁和结果验收。
 import com.agent4.llm.*; // 每次尝试独立创建可取消客户端。
 import com.agent4.tool.ToolRegistry; // 工具池按执行尝试创建并清理。
 import com.agent4.tool.builtin.BasicTools; // 第一版仅开放计算与时间等无外部写副作用工具。
@@ -77,10 +78,10 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
         Submit input = tasks.readInput(claim.task()); // 参数来自持久化输入快照。
         boolean diagnosis = input.diagnosis() != null, demo = apiKey == null || apiKey.isBlank(); // 业务类型和模型模式分别标注。
         if (!settings.toolSetVersion().equals(diagnosis ? DiagnosisPolicy.VERSION : "safe-v1")) throw new IllegalStateException("任务类型与工具集版本不匹配"); // 不让旧版本或损坏任务获得额外工具。
-        DiagnosisTools investigation = diagnosis ? new DiagnosisTools(input.diagnosis(), diagnosisSource, claim.attemptNo()) : null; // 每次尝试隔离范围、预算和证据。
+        DiagnosisWorkflow investigation = diagnosis ? new DiagnosisWorkflow(input.diagnosis(), diagnosisSource, claim.attemptNo(), demo ? "DEMO_SCRIPT" : "REAL_MODEL", Duration.ofSeconds(maxRuntime)) : null; // 每次尝试隔离业务范围与证据，通用治理交给 Harness。
         LLMClient llm = demo ? diagnosis ? new DiagnosisDemoClient() : new MockLLMClient(List.of(new ChatResponse("演示任务已完成：" + input.goal(), List.of(), new ChatResponse.Usage(0, 0)))) : new OpenAiCompatClient(baseUrl, apiKey, settings.model()); // 无密钥时保留明确的演示模式。
         ToolRegistry tools = new ToolRegistry(10000); // 工单不注册通用工具，更不开放任意 URL 与 Shell。
-        if (diagnosis) tools.register(investigation); else tools.register(new BasicTools()); // 业务类型决定工具白名单。
+        if (diagnosis) tools.register(investigation.tools()); else tools.register(new BasicTools()); // 业务适配器决定工具能力，Harness 再按策略授权。
         if (!diagnosis && input.knowledgeId() != null && !input.knowledgeId().isBlank()) tools.register(new TaskKnowledgeTool(knowledge, claim.task().userId(), input.knowledgeId())); // 通用任务保留已有知识功能。
         ScheduledFuture<?> pulse = heartbeats.scheduleAtFixedRate(() -> { // 独立线程周期检查执行权和取消请求。
             try { // 任一控制设施失效都保守停止新增付费工作。
@@ -93,22 +94,22 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
             private void flush() { if (!pending.isEmpty()) { tasks.append(claim, "delta", pending.toString()); pending.setLength(0); } } // 重要事件前先持久化累计文本。
             @Override public void onIterationStart(int step) { if (!tasks.heartbeat(claim) || !slots.refresh(claim.task().userId(), token)) { stop.set(true); throw new IllegalStateException("执行权失效或任务已取消"); } tasks.append(claim, "iteration", Integer.toString(step)); } // 每次模型调用前再次验证权限。
             @Override public void onAssistantDelta(String delta) { if (stop.get()) throw new IllegalStateException("任务已停止"); if (!diagnosis) { pending.append(delta); if (pending.length() >= 256) flush(); } } // 工单最终报告验收前不作为正式结果展示。
-            @Override public void onActionStart(ToolCall call) { if (diagnosis) investigation.beforeCall(); flush(); tasks.append(claim, "action", call.name() + " " + call.argumentsJson()); } // 包括错误工具名在内的调用都消耗调查预算。
+            @Override public void onActionStart(ToolCall call) { flush(); tasks.append(claim, "action", call.name() + " " + call.argumentsJson()); } // 监听器只记录尝试，预算和权限由 Harness 工具入口执行。
             @Override public void onObservation(ToolCall call, String observation) { tasks.append(claim, "observation", observation); } // 结果作为可回放事件持久化。
             @Override public void onFinalAnswer(String answer) { flush(); if (!diagnosis) tasks.append(claim, "answer", answer); } // 工单报告需要额外经过引用与结构验收。
             @Override public void onError(String message) { log.info("agent_stopped taskId={} attemptNo={} reason={}", claim.task().id(), claim.attemptNo(), message); } // 停止后不再强行写入失效事件流。
         }; // 完成监听器装配。
         try { // 执行和结算异常由外层消费处理，租约恢复兜底。
             AgentConfig config = AgentConfig.builder().model(settings.model()).maxTokens(settings.maxTokens()).maxIterations(input.maxSteps()).build(); // 沿用任务快照的模型与步数上限。
-            ReActAgent agent = diagnosis ? new ReActAgent(llm, tools, config, DiagnosisWorkflow.PROMPT + "\n本次固定范围：" + Json.write(input.diagnosis())) : new ReActAgent(llm, tools, config); // Workflow 固定边界，循环仍自主选择行动。
+            HarnessWorkflow workflow = diagnosis ? investigation : new SafeTaskWorkflow(tools.names(), Math.multiplyExact(input.maxSteps(), 4), Duration.ofSeconds(maxRuntime)); // 两类业务通过同一扩展点运行，通用调用预算为步数上限乘四。
+            HarnessContext context = new HarnessContext(claim.task().id(), claim.task().traceId(), claim.attemptNo()); // 绑定本次持久化执行身份。
+            tasks.append(claim, "harness", Json.write(Map.of("phase", "STARTED", "context", context, "policyVersion", workflow.policy().version(), "allowedTools", workflow.policy().allowedTools(), "maxToolCalls", workflow.policy().maxToolCalls(), "maxRuntimeMillis", workflow.policy().maxRuntime().toMillis()))); // 可回放的运行边界不含密钥。
             if (diagnosis) tasks.append(claim, "workflow", "SCOPE_VALIDATED → INVESTIGATING；证据源为独立模拟环境，报告等待人工确认"); // 将阶段转换写入持久事件。
-            agent.setListener(listener); // 绑定当前尝试的事件出口。
-            AgentTrace trace = agent.run(input.goal(), stop::get); // 核心层仅依赖抽象取消信号。
+            HarnessResult run = new AgentHarness().run(new HarnessRequest(context, input.goal(), config, workflow), llm, tools, listener, stop::get); // 工具门禁、预算、独立上下文和验收统一执行。
+            AgentTrace trace = run.trace(); // 失败和验收拒绝仍保留已知模型用量。
             Thread.interrupted(); // 数据库结算不携带取消中断，但仍必须验证租约。
-            boolean success = trace.status() == AgentTrace.Status.COMPLETED && !stop.get(); String answer = trace.finalAnswer(), error = stop.get() ? "执行已取消、超时或失去执行权" : trace.error(); // 用量保留所有已知模型调用。
-            if (diagnosis && success) { // 报告验收失败立即结算失败，不用租约重试掩盖格式错误。
-                try { answer = DiagnosisWorkflow.accept(answer, input.diagnosis(), investigation.evidence(), demo ? "DEMO_SCRIPT" : "REAL_MODEL"); } catch (IllegalArgumentException invalid) { success = false; error = invalid.getMessage(); answer = null; } // 只验证结构与引用存在，语义正确性另行评估。
-            } // 结束报告硬约束验收。
+            boolean success = run.successful() && !stop.get(); String answer = success ? run.answer() : null, error = stop.get() ? "执行已取消、超时或失去执行权" : run.error(); // 结算依赖正式验收结果，循环完成本身不算业务成功。
+            if (!stop.get()) tasks.append(claim, "harness", Json.write(Map.of("phase", success ? "ACCEPTED" : "REJECTED", "policyVersion", workflow.policy().version(), "toolCalls", run.toolCalls()))); // 在执行权仍有效时记录实际预算消耗，失权仍由状态机拒绝写入。
             if (diagnosis && success) tasks.append(claim, "report", answer); // 正式报告有完整证据与模式标识。
             boolean committed = tasks.finish(claim, new Result(success, answer, error, trace.promptTokens(), trace.completionTokens())); // 只有落库终态才表示报告已成功生成。
             log.info("attempt_finished taskId={} traceId={} attemptNo={} committed={}", claim.task().id(), claim.task().traceId(), claim.attemptNo(), committed); // false 表示旧尝试无权覆盖当前任务。
