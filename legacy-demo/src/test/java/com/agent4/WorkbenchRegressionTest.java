@@ -44,13 +44,17 @@ class WorkbenchRegressionTest { // 覆盖此前缺失的协议和并发场景。
         assertThrows(IllegalStateException.class, memory::window); // 无法安全裁剪时明确失败。
     } // 完成参数预算回归测试。
     @Test void keepsMultipleToolResultsTogether() { // 验证最新一轮多个工具结果均被保留。
-        SlidingWindowMemory memory = new SlidingWindowMemory(4, 1000); // 窗口可容纳 system 和三条工具相关消息。
+        SlidingWindowMemory memory = new SlidingWindowMemory(5, 1000); // 必需窗口包含 system、当前问题和三条工具相关消息。
         memory.add(ChatMessage.system("规则")); // 添加系统提示词。
-        memory.add(ChatMessage.user("旧输入")); // 此输入应在裁剪时被淘汰。
+        memory.add(ChatMessage.user("当前问题")); // 唯一用户输入就是当前目标，必须保留。
+        memory.add(ChatMessage.assistantWithToolCalls("", List.of(new ToolCall("old", "one", "{}")))); // 添加真正可以淘汰的旧工具组。
+        memory.add(ChatMessage.toolResult("old", "旧证据")); // 让实际消息数超过五条，确保仍触发裁剪。
         memory.add(ChatMessage.assistantWithToolCalls("", List.of(new ToolCall("a", "one", "{}"), new ToolCall("b", "two", "{}")))); // 一轮发起两个调用。
         memory.add(ChatMessage.toolResult("a", "一")); // 添加第一个结果。
         memory.add(ChatMessage.toolResult("b", "二")); // 添加第二个结果。
-        assertEquals(List.of("system", "assistant", "tool", "tool"), memory.window().stream().map(ChatMessage::role).toList()); // 全部调用结果应一起留下。
+        List<ChatMessage> window = memory.window(); // 触发旧工具组裁剪。
+        assertEquals(List.of("system", "user", "assistant", "tool", "tool"), window.stream().map(ChatMessage::role).toList()); // 当前问题和全部最新结果共同保留。
+        assertEquals("当前问题", window.get(1).content()); // 不再把丢失目标当成正确行为。
     } // 完成多工具回归测试。
     @Test void isolatesConcurrentRunsAndListeners() throws Exception { // 用同时在途的模型请求验证隔离。
         LLMClient llm = mock(LLMClient.class); // 避免联网并精确控制执行时序。

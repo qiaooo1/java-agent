@@ -2,7 +2,7 @@ package com.agent4.agent; // 记忆实现与引擎同包，引擎可直接使用
 
 import com.agent4.llm.ChatMessage; // 仅依赖统一消息模型，记忆不关心 LLM 传输细节。
 
-import java.util.ArrayDeque; // 双端队列支持尾部追加、头部淘汰，正好对应滑动窗口。
+import java.util.ArrayDeque; // 双端队列按时间顺序保存历史，裁剪结果统一回写。
 import java.util.ArrayList; // window 需要返回可复制快照，因此依赖 ArrayList。
 import java.util.Deque; // Deque 接口便于未来替换为有界实现。
 import java.util.List; // 对外返回副本，避免调用方直接持有内部队列。
@@ -11,11 +11,11 @@ import java.util.List; // 对外返回副本，避免调用方直接持有内部
  * 滑动窗口记忆：保存对话历史，并按「消息条数 + 字符预算」双重限制裁剪后送给模型。
  *
  * <p>长对话会撑爆上下文窗口（token 超限报错或费用失控），因此用滑动窗口
- * 只保留最近 N 条、总字符不超预算的历史，旧消息被淘汰。</p>
+ * 固定系统指令、当前用户问题和最新完整交互组，按预算淘汰其余旧历史。</p>
  */
 public final class SlidingWindowMemory { // 非线程安全，由单个引擎实例独占，避免并发改窗口。
 
-    private final Deque<ChatMessage> messages = new ArrayDeque<>(); // 头部是最旧消息，尾部是新消息，淘汰永远从头开始。
+    private final Deque<ChatMessage> messages = new ArrayDeque<>(); // 保存原始时序，裁剪时跳过受保护的当前问题。
     private final int maxMessages; // 条数上限在构造时固定，运行期不调整。
     private final int maxChars; // 字符预算是保守近似，避免引入精确 token 计算依赖。
 
@@ -44,22 +44,29 @@ public final class SlidingWindowMemory { // 非线程安全，由单个引擎实
         messages.clear(); // 清空为 O(n)，仅在新任务开始时调用。
     } // 结束 clear。
 
-    /** 裁剪：从头部淘汰，直到同时满足消息数与字符预算。 */
+    /** 裁剪：成组淘汰可删除历史，同时固定系统指令、当前问题与最新交互。 */
     private void trim() { // 私有裁剪在每次请求前调用，运行中不修改窗口。
-        ChatMessage system = messages.peekFirst(); // 检查首条系统消息。
-        boolean pinned = system != null && "system".equals(system.role()); // 系统提示词固定保留。
-        if (pinned) messages.removeFirst(); // 暂时取出系统消息，简化分组删除。
-        try { // 无论预算检查结果如何，都必须恢复系统消息。
-            while (messages.size() + (pinned ? 1 : 0) > maxMessages || characters() + (pinned ? size(system) : 0) > maxChars) { // 同时限制数量与字符。
-                List<ChatMessage> snapshot = new ArrayList<>(messages); // 快照用于确定消息组边界。
-                int end = 1; // 普通消息单独组成一组。
-                while (end < snapshot.size() && "tool".equals(snapshot.get(end).role())) end++; // 将 assistant 调用和其全部结果一起淘汰。
-                if (end >= snapshot.size()) throw new IllegalStateException("最新消息组超过上下文预算，请缩短输入或调大窗口"); // 保留最新组的协议完整性。
-                for (int i = 0; i < end; i++) messages.removeFirst(); // 整组移除旧消息。
-            } // 达到预算后停止裁剪。
-        } finally { // 恢复被保护的系统消息。
-            if (pinned) messages.addFirst(system); // 保证 system 仍然位于首位。
-        } // 结束安全裁剪。
+        long chars = characters(); // 固定消息也必须计入字符预算。
+        if (messages.size() <= maxMessages && chars <= maxChars) return; // 正常窗口不重排、不删除历史。
+        List<ChatMessage> snapshot = new ArrayList<>(messages); // 先在快照上裁剪，失败时不破坏原始历史。
+        int first = !snapshot.isEmpty() && "system".equals(snapshot.get(0).role()) ? 1 : 0; // 首条系统指令始终保留。
+        int question = -1; // 没有 user 消息的调用方仍可使用窗口。
+        for (int i = first; i < snapshot.size(); i++) if ("user".equals(snapshot.get(i).role())) question = i; // 只固定当前最新问题，旧轮次可以正常淘汰。
+        while (snapshot.size() > maxMessages || chars > maxChars) { // 条数与字符预算同时生效。
+            boolean removed = false; // 每轮必须删除一个完整且可淘汰的组。
+            for (int start = first; start < snapshot.size();) { // 从最旧历史开始查找，跳过固定问题。
+                int end = start + 1; // 普通消息单独为一组。
+                while (end < snapshot.size() && "tool".equals(snapshot.get(end).role())) end++; // assistant 工具调用与全部结果必须成组处理。
+                if (start != question && end < snapshot.size()) { // 最新问题及最新交互组都不能为了满足预算被删除。
+                    for (int i = start; i < end; i++) chars -= size(snapshot.get(i)); // 仅减去实际删除组的字符数。
+                    if (question >= end) question -= end - start; // 删除前置历史后同步固定问题的位置。
+                    snapshot.subList(start, end).clear(); removed = true; break; // 保持其余消息的原相对顺序。
+                } // 当前组受保护时继续查找更后的旧组。
+                start = end; // 不从工具结果中间开始淘汰。
+            } // 完成一次安全删除选择。
+            if (!removed) throw new IllegalStateException("系统指令、当前问题与最新消息组超过上下文预算，请缩短输入或调大窗口"); // 必需上下文无法容纳时明确终止。
+        } // 裁剪成功才更新内部记忆。
+        messages.clear(); messages.addAll(snapshot); // 不重排固定消息，也不保留孤立工具结果。
     } // 结束 trim。
     private long characters() { // 使用 long 防止字符计数溢出。
         return messages.stream().mapToLong(this::size).sum(); // 汇总正文与工具调用的字符数。

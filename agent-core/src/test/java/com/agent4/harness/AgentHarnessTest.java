@@ -102,4 +102,15 @@ class AgentHarnessTest { // 同一 Harness 支持多次独立运行。
             assertTrue(result.successful(), result.error()); assertEquals(1000, wait.get()); // 实际执行器拿不到完整的三十秒。
         } finally { registry.closeWorkers(); } // 关闭底层注册表。
     } // 结束剩余工具等待预算场景。
+    @Test void successiveToolRoundsRetainOriginalQuestionInModelRequests() { // 从真实模型请求验证窗口裁剪不会让 Harness 丢失任务目标。
+        Probe probe = new Probe(null); ToolRegistry tools = new ToolRegistry().register(probe); String goal = "保留原始故障问题"; // 连续两轮工具读取会触发四条消息窗口的裁剪。
+        LLMClient model = model(calls(call("allowed", "{}")), calls(call("allowed", "{}")), answer()); // 第三轮模型请求必须仍然包含用户问题。
+        HarnessRequest request = new HarnessRequest(new HarnessContext("task", "trace", 1), goal, AgentConfig.builder().maxIterations(3).memoryWindowMessages(4).build(), workflow(Set.of("allowed"), 2, Duration.ofMinutes(1), UnaryOperator.identity())); // 窗口刚好容纳系统、问题及最新工具组。
+        try { // 整条执行链使用真实 ReAct 与工具注册表。
+            HarnessResult result = new AgentHarness().run(request, model, tools, null, () -> false); // 执行两次读取后给出正式答案。
+            assertTrue(result.successful(), result.error()); assertEquals(2, probe.allowed.get()); // 裁剪不阻断正常调查。
+            var capture = org.mockito.ArgumentCaptor.forClass(ChatRequest.class); verify(model, times(3)).chatStream(capture.capture(), any()); // 检查每轮实际发送的上下文。
+            for (ChatRequest sent : capture.getAllValues()) assertTrue(sent.messages().stream().anyMatch(message -> "user".equals(message.role()) && goal.equals(message.content())), "每轮请求都必须保留原始问题"); // 不能仅检查最终答案来掩盖问题丢失。
+        } finally { tools.closeWorkers(); } // 清理真实工具执行器。
+    } // 结束 Harness 连续调查的目标保留场景。
 } // 结束 Harness 核心回归。
