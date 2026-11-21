@@ -31,7 +31,7 @@ public class SecurityConfiguration { // 不信任 X-User-Id 等外部可伪造�
                 .csrf(csrf -> csrf.disable()) // 仅使用显式 Bearer 令牌，不依赖浏览器自动附带的认证 Cookie。
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)) // 平台实例不保存服务器 Session。
                 .authorizeHttpRequests(auth -> auth // 身份验证之外，还要明确匿名入口。
-                        .requestMatchers("/", "/index.html", "/app.js", "/styles.css", "/favicon.ico", "/api/auth/**", "/actuator/health").permitAll() // 根路径内部转发到 index.html，两个入口都必须允许匿名访问。
+                        .requestMatchers("/", "/index.html", "/app.js", "/progress.js", "/styles.css", "/favicon.ico", "/api/auth/**", "/actuator/health").permitAll() // 静态进度脚本可匿名加载，业务进度接口仍需认证。
                         .anyRequest().authenticated()) // 其余 API 和指标必须通过 JWT 验证。
                 .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> {})) // 使用已配置的签名、发行者与有效期校验。
                 .addFilterAfter(rateFilter, BearerTokenAuthenticationFilter.class) // 限流键取自已验证身份，不能信任客户端用户头。

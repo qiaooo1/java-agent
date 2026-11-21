@@ -22,6 +22,6 @@ public class GatewayConfiguration { // 不为每个服务引入注册中心，Co
         return decoder; // 安全链从验签结果构造身份。
     } // 结束网关验签器。
     @Bean SecurityWebFilterChain security(ServerHttpSecurity http) { // 网关承担入口保护，平台承担最终资源授权。
-        return http.csrf(csrf -> csrf.disable()).authorizeExchange(auth -> auth.pathMatchers("/", "/index.html", "/app.js", "/styles.css", "/favicon.ico", "/api/auth/**", "/actuator/health").permitAll().anyExchange().authenticated()).oauth2ResourceServer(oauth -> oauth.jwt(jwt -> {})).build(); // 首页及其实际静态资源允许匿名访问，业务接口仍需令牌。
+        return http.csrf(csrf -> csrf.disable()).authorizeExchange(auth -> auth.pathMatchers("/", "/index.html", "/app.js", "/progress.js", "/styles.css", "/favicon.ico", "/api/auth/**", "/actuator/health").permitAll().anyExchange().authenticated()).oauth2ResourceServer(oauth -> oauth.jwt(jwt -> {})).build(); // 静态脚本白名单与平台一致，业务进度接口继续验签。
     } // 结束安全链。
 } // 结束网关配置。

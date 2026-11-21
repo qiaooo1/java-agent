@@ -11,6 +11,8 @@
 | 并发与运行中取消 | 模拟器延迟至少八秒后运行 `node scripts/concurrency-smoke.mjs` | 十六个并发重复请求、唯一执行、越权拒绝、取消确认与次数一致性 |
 | Worker 失联恢复 | 同样配置慢模拟器后运行 `node scripts/fault-smoke.mjs --allow-worker-restart` | 强制停止并重启本项目 Worker，验证租约恢复和唯一结算；仅用于隔离的本机环境 |
 | 前端语法 | `node --check platform-service/src/main/resources/static/app.js` | 只证明语法有效，不等于浏览器视觉或交互验证 |
+| 进度状态回归 | `node --test scripts/progress.test.cjs` | 快照水位、事件去重、重试合并、尝试切换和终态计时 |
+| 进度浏览器验证 | `node scripts/progress-ui-smoke.mjs` | 本机固定 API/SSE 下的实际页面实时更新、断线补读、刷新恢复、安全文本与移动布局 |
 | 负载试验 | `k6 run scripts/load.js` | 通过环境变量控制用户数、令牌、持续时间与请求频率 |
 
 默认测试不启动 Docker，真实中间件测试名称以 IT 结尾，只有显式 integration profile 才执行。Docker 不可用时不得将它们标记为通过。H2 兼容模式不能证明所有 MySQL 锁行为。
@@ -20,13 +22,26 @@
 `.github/workflows/ci.yml` 在推送、PR 和手动触发时执行两个独立检查：
 
 - Java：Ubuntu、Temurin Java 17，运行 `mvn -B -ntp verify`，构建所有模块并执行默认回归测试。Maven 依赖按各模块 POM 缓存；Surefire 测试报告无论成功或失败均尝试保留七天。
-- JavaScript：Node.js 24，检查前端 `app.js`，以及 `scripts/`、`evaluation/` 内所有 `.mjs` 脚本的语法。只解析，不执行会访问模型、启动任务或重启 Worker 的脚本。
+- JavaScript：Node.js 24，检查前端 `app.js`、`progress.js` 以及 `scripts/`、`evaluation/` 内所有 `.mjs` 脚本的语法，并运行 `scripts/progress.test.cjs`。该状态测试无外部依赖；CI 不执行浏览器脚本，也不访问模型或重启 Worker。
 
 工作流仅申请读取仓库内容的权限，不需要模型密钥。相同分支或 PR 的新运行会取消旧运行。GitHub Actions 使用固定提交版本，便于复现与审核；后续升级应同步核对版本和行为。
 
 在仓库的 Actions 中选择 CI 运行查看结果，测试报告下载项名为 `java-test-reports`。没有生成报告时给出提示，不以此替代 Maven 本身的成功或失败状态。
 
 默认自动检查不启用 `integration` profile，不启动 Compose，也不评价真实模型效果；这些场景仍按上表单独验证。Windows 本地验证与 Ubuntu 云端运行是不同环境，首次推送后应确认 Actions 的实际结果。
+
+## 进度浏览器验证准备
+
+先安装仅用于本地测试的浏览器驱动：
+
+```powershell
+npm install --prefix target/progress-browser-tools --no-save playwright@1.62.1
+node scripts/progress-ui-smoke.mjs
+```
+
+Windows 自动选择已安装的 Edge 或 Chrome，也可通过 `PROGRESS_BROWSER` 指定可执行文件。没有系统浏览器时，可运行 `npx --prefix target/progress-browser-tools playwright install chromium` 安装 Playwright Chromium。浏览器测试临时启动回环地址 HTTP 服务，使用真实静态页面和可控的 API/SSE 数据，不调用模型、不连接部署中的数据库。截图和检查结果在 `target/progress-ui/`，依赖与产物均被 Git 忽略。
+
+该测试验证前端行为；`PlatformApiTest` 使用实际 Spring Security、H2 与持久化事件验证进度接口权限、水位和边界，`ExecutionProgressTest` / `TaskConsumerTest` 验证 Worker 发出的步骤。它们不能替代真实 MySQL/MQ 多进程部署验收。
 
 ## 必须覆盖的故障
 

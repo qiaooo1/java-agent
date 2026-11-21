@@ -66,6 +66,8 @@ class TaskConsumerTest { // 不需要额外部署消息服务。
             ArgumentCaptor<Result> result = ArgumentCaptor.forClass(Result.class); verify(tasks).finish(eq(claim), result.capture()); assertTrue(result.getValue().success()); assertEquals(4, json.readTree(result.getValue().answer()).path("evidence").size()); assertEquals(5, requests.get()); // 失败尝试没有变成重复证据。
             ArgumentCaptor<String> retry = ArgumentCaptor.forClass(String.class); verify(tasks).append(eq(claim), eq("tool_retry"), retry.capture()); assertEquals("TRANSIENT_FAILURE", json.readTree(retry.getValue()).path("reason").asText()); assertEquals(2, json.readTree(retry.getValue()).path("nextAttempt").asInt()); // 持久化真实恢复安排。
             verify(tasks, times(5)).append(eq(claim), eq("tool_attempt"), anyString()); // 四次成功与一次失败都留下安全状态。
+            ArgumentCaptor<String> steps = ArgumentCaptor.forClass(String.class); verify(tasks, atLeastOnce()).append(eq(claim), eq("step"), steps.capture()); // 进度事件来自实际 Worker 回调。
+            assertTrue(steps.getAllValues().stream().anyMatch(value -> value.contains("RETRYING"))); assertTrue(steps.getAllValues().get(steps.getAllValues().size() - 1).contains("VALIDATION")); assertTrue(steps.getAllValues().get(steps.getAllValues().size() - 1).contains("SUCCEEDED")); // 重试可见，正式验收结束可见。
             var order = inOrder(tasks, channel); order.verify(tasks).finish(eq(claim), any()); order.verify(channel).basicAck(7, false); verify(slots).release(eq("user"), anyString()); // 原有消息确认和容量释放不被改变。
         } finally { consumer.close(); source.stop(0); } // 清理心跳与本机 HTTP 服务。
     } // 结束 Worker 实际恢复接线场景。

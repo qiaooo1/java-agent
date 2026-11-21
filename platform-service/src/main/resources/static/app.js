@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id); // 统一通过固定标识获取页面元素。
 let accessToken = "", activeTask = "", streamAbort = null, lastSeq = 0, cursor = "", pending = null; // 访问令牌仅存内存；任务和事件有独立游标。
 let pendingIncident = null; // 工单网络重试保留相同输入和幂等键。
+let progressState = null, progressError = "", selectionEpoch = 0; const progressRows = new Map(); // 独立选择状态阻止迟到响应串线。
 const localMinute = date => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16); // datetime-local 使用浏览器本地时区。
 $("incidentTo").value = localMinute(new Date()); $("incidentFrom").value = localMinute(new Date(Date.now() - 15 * 60000)); // 默认调查最近十五分钟，提交时转换为 UTC。
 const states = { QUEUED: "排队中", RUNNING: "执行中", CANCEL_REQUESTED: "正在取消", RETRY_WAIT: "等待重试", SUCCEEDED: "已完成", FAILED: "失败", CANCELLED: "已取消" }; // 将状态协议转换为用户可读文本。
@@ -50,19 +51,44 @@ $("taskForm").addEventListener("submit", async event => { // 任务提交只创�
     pending = null; await selectTask(task.id); await Promise.all([loadTasks(true), loadQuota()]); notice("任务已受理，可在历史中继续查看。"); // 已确认创建后才能清除待重试标识。
   } catch (error) { notice(error.message); } finally { button.disabled = false; } // 失败时保留幂等键。
 }); // 结束提交事件绑定。
-async function selectTask(id) { // 切换订阅时保持不同任务的事件序号隔离。
-  if (streamAbort) streamAbort.abort(); activeTask = id; lastSeq = 0; $("events").replaceChildren(); $("answer").textContent = ""; $("diagnosisPanel").hidden = true; // 切换任务时清除前一份工单结果。
-  const task = await api("/api/tasks/" + id); if (activeTask !== id) return; // 快速切换时丢弃迟到响应。
-  $("taskTitle").textContent = states[task.state] || task.state; $("taskMeta").textContent = `任务 ${id} · 尝试 ${task.attemptNo} · Trace ${task.traceId}`; // 展示可用于排障的业务标识。
-  $("answer").textContent = task.answer || task.error || ""; $("cancel").disabled = terminal(task.state()); // 最终答案从持久化任务读取。
-  await showIncident(task); if (activeTask !== id) return; // 工单单独展示报告与人工状态。
-  streamAbort = new AbortController(); void subscribe(id, streamAbort.signal).catch(error => { if (error.name !== "AbortError") notice(error.message); }); // 后台订阅不阻塞页面其他操作。
+const setText = (id, value) => { if ($(id).textContent !== value) $(id).textContent = value; }; // 避免相同状态被辅助阅读器反复播报。
+const duration = millis => { if (millis === null) return "尚未开始"; const seconds = Math.floor(Math.max(0, millis) / 1000); return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`; }; // 耗时不是剩余时间估计。
+function renderProgress() { // 只用安全节点展示结构化元数据。
+  if (!progressState) return; const view = IncidentProgress.view(progressState), list = $("executionSteps"); // 当前尝试与历史步骤共用一个投影。
+  setText("progressStage", view.stage); setText("progressElapsed", duration(view.elapsedMillis)); setText("progressCounts", `已记录 ${view.steps.length} 步 · 完成 ${view.succeeded} 步 · 失败 ${view.failed} 步`); // 不展示推测的完成百分比。
+  setText("taskTitle", states[progressState.state] || progressState.state); $("cancel").disabled = terminal(progressState.state); // 实时事件直接更新任务状态。
+  const notes = [progressError, progressState.truncated ? "仅显示最近的步骤记录，部分历史已截断。" : "", progressState.incomplete ? "部分步骤记录无法解析，请结合原始事件排查。" : ""]; // 不完整数据明确提示。
+  if (!view.steps.length) notes.push(terminal(progressState.state) ? "该任务没有结构化步骤记录，可展开原始事件查看。" : "执行步骤会随实际工作动态追加。"); // 不编造旧任务的执行计划。
+  if (view.lastChangeMillis !== null && view.lastChangeMillis >= 10000 && !terminal(progressState.state)) notes.push(`距离上次步骤更新 ${duration(view.lastChangeMillis)}，尚未收到新的执行事件。`); // 长等待时说明观察边界。
+  setText("progressNotice", notes.filter(Boolean).join(" ")); const scroll = list.scrollTop, atBottom = list.scrollHeight - list.clientHeight - scroll < 24, previousCount = progressRows.size; // 尊重用户阅读历史的位置。
+  const nodes = view.steps.map(step => { // 每个逻辑步骤只创建一行，重试更新原行。
+    let row = progressRows.get(step.id); if (!row) { row = document.createElement("li"); const heading = document.createElement("div"), title = document.createElement("strong"), badge = document.createElement("span"), detail = document.createElement("p"), meta = document.createElement("small"); heading.className = "step-heading"; title.className = "step-title"; badge.className = "step-status"; detail.className = "step-detail"; meta.className = "step-meta"; heading.append(title, badge); row.append(heading, detail, meta); row.className = "execution-step"; row.dataset.stepId = step.id; progressRows.set(step.id, row); } // 动态内容只通过 textContent 写入。
+    row.dataset.status = step.status; row.querySelector(".step-title").textContent = `${step.position}. ${step.title}`; row.querySelector(".step-status").textContent = step.label; row.querySelector(".step-detail").textContent = step.detail; row.querySelector(".step-meta").textContent = `执行尝试 ${step.attemptNo} · ${duration(step.elapsedMillis)}${step.toolAttempt ? ` · 工具尝试 ${step.toolAttempt}` : ""}${step.errorCode ? ` · ${step.errorCode}` : ""}`; return row; // 工具错误与恢复原因可核对。
+  }); // 完成步骤视图。
+  list.replaceChildren(...nodes); list.scrollTop = atBottom && progressRows.size > previousCount ? list.scrollHeight : scroll; // 只有新增行且原本在底部时自动跟随。
+} // 结束步骤渲染。
+setInterval(() => { if (progressState) renderProgress(); }, 1000); // 本地时钟只更新耗时，不制造步骤事件。
+async function refreshProgress(id) { // 初次选择和重连后从受权限保护的快照恢复。
+  const target = progressState, snapshot = await api(`/api/tasks/${id}/progress`); if (activeTask !== id || progressState !== target) return; // 同任务的新选择也有独立状态。
+  IncidentProgress.load(target, snapshot); progressError = ""; renderProgress(); // 旧快照按水位拒绝。
+} // 结束进度恢复。
+async function selectTask(id) { // 切换订阅时同时隔离任务与选择版本。
+  const epoch = ++selectionEpoch; if (streamAbort) streamAbort.abort(); activeTask = id; lastSeq = 0; $("events").replaceChildren(); $("answer").textContent = ""; $("diagnosisPanel").hidden = true; // 原始事件仍支持独立补读。
+  progressState = IncidentProgress.create(id); progressError = ""; progressRows.clear(); $("executionSteps").replaceChildren(); $("progress").hidden = false; setText("progressConnection", "正在读取步骤快照…"); renderProgress(); // 清除上一任务的步骤。
+  const task = await api("/api/tasks/" + id); if (activeTask !== id || epoch !== selectionEpoch) return; // 迟到的同任务选择不能建立重复订阅。
+  progressState.state = task.state; progressState.attemptNo = task.attemptNo; $("taskMeta").textContent = `任务 ${id} · 尝试 ${task.attemptNo} · Trace ${task.traceId}`; // 展示定位信息。
+  $("answer").textContent = task.answer || task.error || ""; renderProgress(); // 正式答案仍来自持久化任务。
+  try { await refreshProgress(id); } catch { if (activeTask === id && epoch === selectionEpoch) { progressError = "步骤快照暂不可用，将尝试实时事件恢复。"; renderProgress(); } } // 不阻止查看原始事件。
+  if (activeTask !== id || epoch !== selectionEpoch) return; await showIncident(task); if (activeTask !== id || epoch !== selectionEpoch) return; // 工单请求绑定当前选择。
+  streamAbort = new AbortController(); void subscribe(id, streamAbort.signal).catch(error => { if (error.name !== "AbortError" && activeTask === id) { setText("progressConnection", "实时连接已断开，请重新选择任务以恢复。"); notice(error.message); } }); // 后台订阅不阻塞其他操作。
 } // 结束任务选择。
+
 async function subscribe(id, signal) { // fetch 支持 Authorization，自行实现带序号的有限重连。
   for (let attempt = 0; attempt < 4 && !signal.aborted; attempt++) { // 避免无限重连掩盖认证或服务故障。
     try { // 每次重连从最后成功处理的业务序号继续。
       const response = await fetch(`/api/tasks/${id}/stream`, { headers: { Authorization: "Bearer " + accessToken, "Last-Event-ID": String(lastSeq) }, signal }); // 令牌不进入查询字符串或日志 URL。
       if (!response.ok || !response.body) throw new Error("事件连接失败，HTTP " + response.status); // 认证和过载错误不能当作正常 SSE。
+      if (activeTask === id) setText("progressConnection", "实时事件已连接"); // 与任务状态分别展示连接状态。
       const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = ""; // 保留分片边界之间的 UTF-8 和事件数据。
       while (!signal.aborted) { // 一次只读取一个连接的字节流。
         const chunk = await reader.read(); if (chunk.done) break; // 服务端终态或两分钟超时都会结束当前流。
@@ -70,26 +96,29 @@ async function subscribe(id, signal) { // fetch 支持 Authorization，自行实
         let boundary; while ((boundary = buffer.indexOf("\n\n")) >= 0) { // 仅处理完整事件。
           const raw = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); // 保留不完整尾部供下一次读取。
           const data = raw.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n"); // 多行 data 按 SSE 规则拼接。
-          if (data && activeTask === id) renderEvent(JSON.parse(data)); // 心跳注释无需渲染。
+          if (data && !signal.aborted && activeTask === id) renderEvent(JSON.parse(data)); // 心跳注释无需渲染。
         } // 结束当前分片内的事件处理。
       } // 结束字节读取。
-      if (signal.aborted) return; const task = await api("/api/tasks/" + id); if (activeTask !== id) return; // 断流后核对任务是否真的完成。
-      $("taskTitle").textContent = states[task.state]; $("answer").textContent = task.answer || task.error || ""; $("cancel").disabled = terminal(task.state()); // 刷新最新持久化结果。
-      await showIncident(task); if (activeTask !== id) return; // 报告生成后才能确认，失败工单仍可转交。
-      if (terminal(task.state()) && lastSeq >= task.nextSeq) { await Promise.all([loadTasks(true), loadQuota()]); return; } // 补齐终态事件后才停止。
-    } catch (error) { if (signal.aborted) return; if (attempt === 3) throw error; } // 主动切换任务不显示错误。
+      if (signal.aborted) return; const task = await api("/api/tasks/" + id); if (signal.aborted || activeTask !== id) return; // 断流后核对任务是否真的完成。
+      $("taskTitle").textContent = states[task.state]; $("answer").textContent = task.answer || task.error || ""; $("cancel").disabled = terminal(task.state); // 刷新最新持久化结果。
+      try { await refreshProgress(id); } catch { if (activeTask === id) { progressError = "步骤快照暂不可用，当前展示来自已接收事件。"; renderProgress(); } } // 断流后核对步骤与任务终态。
+      if (signal.aborted) return; await showIncident(task); if (signal.aborted || activeTask !== id) return; // 报告生成后才能确认，失败工单仍可转交。
+      if (terminal(task.state) && lastSeq >= task.nextSeq) { if (activeTask === id) setText("progressConnection", "执行已结束，事件已补齐"); await Promise.all([loadTasks(true), loadQuota()]); return; } // 补齐终态事件后才停止。
+    } catch (error) { if (signal.aborted) return; if (activeTask === id) setText("progressConnection", `连接中断，准备第 ${attempt + 1} 次恢复…`); if (attempt === 3) throw error; } // 主动切换任务不显示错误。
     await new Promise(resolve => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 8000))); // 采用有上限退避，避免连接故障形成忙循环。
   } // 完成有限重连。
+  if (!signal.aborted && activeTask === id) setText("progressConnection", "实时连接已停止，请重新选择任务以恢复。");
 } // 结束流式订阅。
 function renderEvent(event) { // 用业务序号防止断线重连出现重复轨迹。
-  if (event.seq <= lastSeq) return; lastSeq = event.seq; // 只接受单调推进的事件。
+  if (event.taskId !== activeTask || event.seq <= lastSeq) return; lastSeq = event.seq; // 只接受单调推进的事件。
+  if (progressState && IncidentProgress.apply(progressState, event)) { if (event.type === "step") progressError = ""; renderProgress(); } // 回放不回退快照，同一步骤不重复追加。
   const row = document.createElement("div"), title = document.createElement("small"), content = document.createElement("pre"); // 全部动态文本使用安全节点。
   row.className = "event"; title.textContent = `#${event.seq} / 尝试 ${event.attemptNo} / ${event.type}`; content.textContent = event.data; // 工具参数即使包含 HTML 也只显示文本。
   row.append(title, content); $("events").append(row); $("events").scrollTop = $("events").scrollHeight; // 追加事件不清空已有工具记录。
   if (event.type === "answer") $("answer").textContent = event.data; // 最终状态仍由 task 和 done 决定。
 } // 结束事件渲染。
 $("cancel").addEventListener("click", async () => { // 用户点击表达请求，不假装调用立即停止。
-  try { const task = await api(`/api/tasks/${activeTask}/cancel`, { method: "POST" }); $("taskTitle").textContent = states[task.state]; notice("已提交取消请求，请等待状态确认。"); } catch (error) { notice(error.message); } // 对运行中任务显示中间态。
+  try { const task = await api(`/api/tasks/${activeTask}/cancel`, { method: "POST" }); $("taskTitle").textContent = states[task.state]; await refreshProgress(activeTask).catch(() => {}); notice("已提交取消请求，请等待状态确认。"); } catch (error) { notice(error.message); } // 对运行中任务显示中间态。
 }); // 结束取消操作。
 async function loadKnowledge() { // 可选文档列表只包含自己的文档。
   const documents = await api("/api/knowledge"); $("knowledge").replaceChildren(new Option("不使用知识文档", "")); // 清除旧用户的选择项。

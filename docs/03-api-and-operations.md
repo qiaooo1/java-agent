@@ -28,6 +28,7 @@
 | `GET /api/tasks?before=...&limit=20` | 前一页末条任务 ID 作为游标，最多 50 条 |
 | `GET /api/tasks/{id}` | 自己的状态、结果、配置快照与 traceId |
 | `GET /api/tasks/{id}/attempts` | 自己任务的执行尝试、状态和已知 token 用量 |
+| `GET /api/tasks/{id}/progress` | 自己任务的步骤快照、事件水位、执行尝试时间和历史完整性标记 |
 | `POST /api/tasks/{id}/cancel` | 运行中返回 CANCEL_REQUESTED，不保证立即停止外部请求 |
 | `GET /api/tasks/{id}/events?after=0` | 最多 100 个持久化事件，严格 `seq > after` |
 | `GET /api/tasks/{id}/stream` | Bearer + Last-Event-ID，SSE 事件名 task，data 是 Event JSON |
@@ -55,6 +56,12 @@
 上述示例以已通过 JWT 认证为前提；未认证请求仍先由安全链拒绝。协议错误在提交事务之前返回，不创建任务或预留额度，也不会被统一异常兜底误报为 500。
 
 ## SSE 契约
+
+`step` 类型的 `Event.data` 是 JSON 字符串，包含完整 `ExecutionStep`：`id`、`attemptNo`、`position`、`kind`、`title`、`status`、`iteration`、`tool`、`toolAttempt`、`errorCode`、`detail`、`startedAtMillis`、`updatedAtMillis`、`elapsedMillis`。步骤 ID 为 `a{attemptNo}-step-{position}`；同一次工具调用的自动重试沿用该 ID，前端替换原行。时间使用 Unix 毫秒；运行中耗时根据服务器观测时间继续累计，结束后冻结。`toolAttempt` 是已收到实际结果的尝试次数，下一次待重试的序号写在 `detail` 中。
+
+`GET /api/tasks/{id}/progress` 返回 `taskId`、任务 `state`、`attemptNo`、`lastSeq`、`observedAtMillis`、`attemptStartedAtMillis`、`attemptFinishedAtMillis`、`truncated`、`incomplete` 和 `steps`。未认证返回 401，其他用户的任务与不存在的任务均返回 404。查询最多投影最近 500 条步骤更新，超出时 `truncated=true`；无效步骤记录被跳过并设置 `incomplete=true`，不返回其原始内容。
+
+快照只读取 `seq <= lastSeq` 的已持久化步骤。客户端拒绝低于当前水位的快照，按任务和序号去重 SSE；原始事件使用独立水位回放。旧任务没有步骤记录时返回空列表。任务取消、失败、租约恢复可能没有步骤结束事件，此时未结束步骤显示取消或中断，不推断该步骤成功。详细状态语义见 [Harness 指南](07-harness.md#执行步骤与进度恢复)。
 
 工具恢复沿用现有任务事件查询与 SSE，不增加独立接口。`tool_attempt` 的 `data` 可解析为 JSON，包含 `tool`、`callId`、`attempt`、`status`、`errorCode`；`tool_retry` 包含相同调用标识以及 `nextAttempt`、`reason`、`delayMillis`，表示一次真实安排的重试。重试期间取消或到期可能阻止下一次执行，不能把重试安排视为执行成功。
 

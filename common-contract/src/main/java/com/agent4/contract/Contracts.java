@@ -1,5 +1,6 @@
 package com.agent4.contract; // 协议层只使用 JDK 类型，避免跨服务泄漏数据库实现。
 import java.time.Instant; // 时间在 HTTP 和消息中采用带时区的标准表示。
+import java.util.List; // 步骤快照返回按实际发生顺序排列的列表。
 public final class Contracts { // 集中定义小型跨服务协议，按领域分组阅读。
     private Contracts() {} // 禁止实例化协议容器。
     public enum State { QUEUED, RUNNING, CANCEL_REQUESTED, RETRY_WAIT, SUCCEEDED, FAILED, CANCELLED } // 取消请求不是终态。
@@ -12,6 +13,8 @@ public final class Contracts { // 集中定义小型跨服务协议，按领域�
     public record Task(String id, String userId, String requestKey, String inputJson, String agentConfigJson, String state, int attemptNo, int maxAttempts, String workerId, Instant leaseUntil, boolean cancelRequested, String answer, String error, String billingPeriod, String traceId, Instant createdAt, int nextSeq) {} // 输入和执行配置共同构成任务快照。
     public record Dispatch(int version, String taskId, String traceId) {} // 消息只通知任务就绪，Worker 必须回库校验状态。
     public record Event(String taskId, int seq, int attemptNo, String type, String data, Instant createdAt) {} // 业务序号用于断线补读和客户端去重。
+    public record ExecutionStep(String id, int attemptNo, int position, String kind, String title, String status, int iteration, String tool, int toolAttempt, String errorCode, String detail, long startedAtMillis, long updatedAtMillis, long elapsedMillis) {} // 完整步骤更新可从任一持久化事件恢复，不包含工具参数或模型内容。
+    public record TaskProgress(String taskId, String state, int attemptNo, int lastSeq, long observedAtMillis, long attemptStartedAtMillis, long attemptFinishedAtMillis, boolean truncated, boolean incomplete, List<ExecutionStep> steps) {} // 序号作为快照水位，结束耗时按持久化时刻冻结。
     public record Claim(Task task, int attemptNo, String workerId) {} // 执行凭证包含 fencing 所需的尝试编号与执行者。
     public record Result(boolean success, String answer, String error, int promptTokens, int completionTokens) {} // 记录已知用量，不把失败等同于零成本。
     public record Account(int limitTasks, int usedTasks, int reservedTasks, String period) {} // 第一版按任务次数控制额度，token 独立统计。

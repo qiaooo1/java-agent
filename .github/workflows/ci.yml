@@ -46,7 +46,7 @@ jobs:
           retention-days: 7
 
   javascript:
-    name: JavaScript syntax checks
+    name: JavaScript syntax and progress regression tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -61,7 +61,12 @@ jobs:
           node-version: '24'
 
       - name: Check browser application syntax
-        run: node --check platform-service/src/main/resources/static/app.js
+        run: |
+          node --check platform-service/src/main/resources/static/app.js
+          node --check platform-service/src/main/resources/static/progress.js
+
+      - name: Verify progress replay and state transitions
+        run: node --test scripts/progress.test.cjs
 
       - name: Check smoke-test and evaluation script syntax
         run: find scripts evaluation -type f -name '*.mjs' -print0 | xargs -0 -r -n1 node --check

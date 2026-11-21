@@ -13,6 +13,8 @@ import com.agent4.tool.ToolErrorCode; // 重试事件不包含底层异常原文
 public interface AgentListener { // 所有方法都是 default 空实现，新增事件不会破坏已有实现类。
     default void onToolAttempt(ToolCall call, int attempt, ToolResult result) {} // 一次模型调用可包含多次受控物理尝试。
     default void onToolRetry(ToolCall call, int nextAttempt, ToolErrorCode reason, long delayMillis) {} // 先记录真实重试安排，再等待并重新检查执行权。
+    default void onModelResponse(int step) {} // 仅标记一轮模型请求完成，不公开模型内部思考。
+    default void onValidationStart() {} // 正式业务验收开始时发出，不能提前表示验收成功。
 
     /** 一轮 ReAct 迭代开始。 */
     default void onIterationStart(int step) { // 每轮迭代开始回调，step 从 1 递增，UI 可据此显示进度。

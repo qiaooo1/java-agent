@@ -92,14 +92,17 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
             synchronized (lifecycle) { if (stop.get() && !finished.get()) { llm.cancel(); executing.interrupt(); } } // 执行退出与取消互斥，防止迟到心跳中断下一次消费。
         }, 5, 5, TimeUnit.SECONDS); // 每五秒续约，小于三十秒租约。
         StringBuilder pending = new StringBuilder(); // 合并文本增量，避免每个 token 都单独提交数据库事务。
+        ExecutionProgress progress = new ExecutionProgress(claim.attemptNo(), step -> tasks.append(claim, "step", Json.write(step)), Clock.systemUTC()); // 步骤状态通过原有凭证校验后持久化。
         AgentListener listener = new AgentListener() { // 事件写入始终携带 fencing 凭证。
             private void flush() { if (!pending.isEmpty()) { tasks.append(claim, "delta", pending.toString()); pending.setLength(0); } } // 重要事件前先持久化累计文本。
-            @Override public void onIterationStart(int step) { if (!tasks.heartbeat(claim) || !slots.refresh(claim.task().userId(), token)) { stop.set(true); throw new IllegalStateException("执行权失效或任务已取消"); } tasks.append(claim, "iteration", Integer.toString(step)); } // 每次模型调用前再次验证权限。
+            @Override public void onIterationStart(int step) { if (!tasks.heartbeat(claim) || !slots.refresh(claim.task().userId(), token)) { stop.set(true); throw new IllegalStateException("执行权失效或任务已取消"); } tasks.append(claim, "iteration", Integer.toString(step)); progress.modelStarted(step); } // 每次模型调用前再次验证权限并创建实际步骤。
+            @Override public void onModelResponse(int step) { progress.modelCompleted(step); } // 模型响应到达后立即结束对应分析步骤。
+            @Override public void onValidationStart() { progress.validationStarted(); } // 在结果验收前向用户展示真实阶段。
             @Override public void onAssistantDelta(String delta) { if (stop.get()) throw new IllegalStateException("任务已停止"); if (!diagnosis) { pending.append(delta); if (pending.length() >= 256) flush(); } } // 工单最终报告验收前不作为正式结果展示。
-            @Override public void onActionStart(ToolCall call) { flush(); tasks.append(claim, "action", call.name() + " " + call.argumentsJson()); } // 监听器只记录尝试，预算和权限由 Harness 工具入口执行。
+            @Override public void onActionStart(ToolCall call) { flush(); tasks.append(claim, "action", call.name() + " " + call.argumentsJson()); progress.toolStarted(call.name() != null && tools.names().contains(call.name()) ? call.name() : "未知工具"); } // 步骤标题不携带工具参数。
             @Override public void onObservation(ToolCall call, String observation) { tasks.append(claim, "observation", observation); } // 结果作为可回放事件持久化。
-            @Override public void onToolAttempt(ToolCall call, int attempt, ToolResult result) { tasks.append(claim, "tool_attempt", Json.write(Map.of("tool", call.name() != null && tools.names().contains(call.name()) ? call.name() : "<unknown>", "callId", call.id() == null ? "" : call.id(), "attempt", attempt, "status", result.successful() ? "SUCCEEDED" : "FAILED", "errorCode", result.successful() ? "NONE" : result.error().name()))); } // 调用标识关联多次尝试，不记录原始参数和底层异常消息。
-            @Override public void onToolRetry(ToolCall call, int nextAttempt, ToolErrorCode reason, long delayMillis) { tasks.append(claim, "tool_retry", Json.write(Map.of("tool", call.name(), "callId", call.id() == null ? "" : call.id(), "nextAttempt", nextAttempt, "reason", reason.name(), "delayMillis", delayMillis))); } // 重试前的真实安排可通过 SSE 与事件补读查看。
+            @Override public void onToolAttempt(ToolCall call, int attempt, ToolResult result) { tasks.append(claim, "tool_attempt", Json.write(Map.of("tool", call.name() != null && tools.names().contains(call.name()) ? call.name() : "<unknown>", "callId", call.id() == null ? "" : call.id(), "attempt", attempt, "status", result.successful() ? "SUCCEEDED" : "FAILED", "errorCode", result.successful() ? "NONE" : result.error().name()))); progress.toolAttempt(attempt, result); } // 调用标识关联多次尝试，不记录原始参数和底层异常消息。
+            @Override public void onToolRetry(ToolCall call, int nextAttempt, ToolErrorCode reason, long delayMillis) { tasks.append(claim, "tool_retry", Json.write(Map.of("tool", call.name(), "callId", call.id() == null ? "" : call.id(), "nextAttempt", nextAttempt, "reason", reason.name(), "delayMillis", delayMillis))); progress.retry(nextAttempt, reason, delayMillis); } // 同一步骤展示真实重试安排。
             @Override public void onFinalAnswer(String answer) { flush(); if (!diagnosis) tasks.append(claim, "answer", answer); } // 工单报告需要额外经过引用与结构验收。
             @Override public void onError(String message) { log.info("agent_stopped taskId={} attemptNo={} reason={}", claim.task().id(), claim.attemptNo(), message); } // 停止后不再强行写入失效事件流。
         }; // 完成监听器装配。
@@ -113,6 +116,7 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
             AgentTrace trace = run.trace(); // 失败和验收拒绝仍保留已知模型用量。
             Thread.interrupted(); // 数据库结算不携带取消中断，但仍必须验证租约。
             boolean success = run.successful() && !stop.get(); String answer = success ? run.answer() : null, error = stop.get() ? "执行已取消、超时或失去执行权" : run.error(); // 结算依赖正式验收结果，循环完成本身不算业务成功。
+            if (!stop.get()) progress.finish(success); // 失去执行权时不伪造完成事件，查询端依据持久化任务状态标记中断。
             if (!stop.get()) tasks.append(claim, "harness", Json.write(Map.of("phase", success ? "ACCEPTED" : "REJECTED", "policyVersion", workflow.policy().version(), "toolCalls", run.toolCalls()))); // 在执行权仍有效时记录实际预算消耗，失权仍由状态机拒绝写入。
             if (diagnosis && success) tasks.append(claim, "report", answer); // 正式报告有完整证据与模式标识。
             boolean committed = tasks.finish(claim, new Result(success, answer, error, trace.promptTokens(), trace.completionTokens())); // 只有落库终态才表示报告已成功生成。

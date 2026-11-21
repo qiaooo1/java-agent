@@ -108,6 +108,7 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
                         config.temperature(), config.maxTokens(), config.stream()); // 采样参数与流式开关直接取自不可变配置。
                 ChatResponse response = llm.chatStream(request, listener::onAssistantDelta); // 流式调用把文本增量透传，同时仍返回完整响应供循环判断。
                 trace.addUsage(response.usage()); // 用量立即计入轨迹，异常中止时也能保留已花成本。
+                listener.onModelResponse(step); // 响应已聚合且用量已记录，实际工具执行尚未开始。
 
                 memory.add(ChatMessage.assistantWithToolCalls(response.content(), response.toolCalls())); // 模型回复先入记忆：工具调用消息必须与随后的工具结果配对。
 

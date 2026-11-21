@@ -33,3 +33,22 @@ button:disabled { opacity: .5; cursor: not-allowed; } /* 异步提交时禁止�
 pre { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.7 ui-monospace, "Microsoft YaHei", monospace; } /* 模型和工具输出安全换行。 */
 #answer:not(:empty) { background: #edf4e9; padding: 16px; border-radius: 10px; } /* 最终结果与执行轨迹分开显示。 */
 @media (max-width: 780px) { header, main, footer { padding: 20px; } #workspace:not([hidden]) { grid-template-columns: 1fr; } aside { position: static; } .controls { grid-template-columns: 1fr 80px; } .controls button { grid-column: 1 / -1; } } /* 小屏改成单列。 */
+.progress { border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 16px 0; background: #f7faf5; } /* 业务进度与原始日志分层展示。 */
+.progress-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; } /* 状态和耗时同时可见。 */
+#progressStage { display: block; font-size: 16px; overflow-wrap: anywhere; } /* 长工具名不能撑宽页面。 */
+.progress-time { flex-shrink: 0; text-align: right; } /* 耗时保持稳定位置。 */
+.progress-time span, .progress-time strong { display: block; } /* 标签不和数值挤在一行。 */
+.progress-time span { color: var(--muted); font-size: 12px; } /* 耗时是观察值，不是剩余时间估计。 */
+.execution-steps { list-style: none; padding: 0; margin: 12px 0 0; max-height: 390px; overflow: auto; } /* 历史较长时独立滚动。 */
+.execution-step { border-left: 3px solid #d2ddd2; padding: 10px 12px; margin: 8px 0; background: white; border-radius: 0 8px 8px 0; } /* 顺序步骤有清楚的视觉分组。 */
+.step-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; } /* 保留状态徽标的位置。 */
+.step-title, .step-detail, .step-meta { overflow-wrap: anywhere; min-width: 0; } /* 动态文字只作为文本处理。 */
+.step-status { flex-shrink: 0; font-size: 12px; color: var(--muted); } /* 状态不用颜色单独表达。 */
+.step-detail { margin: 5px 0; font-size: 14px; } /* 真实动作说明优于裸 JSON。 */
+.step-meta { display: block; color: var(--muted); font-size: 12px; } /* 显示尝试、耗时和错误码。 */
+.execution-step[data-status="RUNNING"] { border-color: #2e7957; } /* 活跃步骤强调。 */
+.execution-step[data-status="RETRYING"] { border-color: #ad7c14; } /* 重试是等待状态，不冒充成功。 */
+.execution-step[data-status="FAILED"], .execution-step[data-status="INTERRUPTED"] { border-color: #b44d3d; } /* 失败或中断历史不会被隐藏。 */
+.execution-step[data-status="SUCCEEDED"] { border-color: #80a58c; } /* 已完成状态保留低调强调。 */
+.raw-events summary { cursor: pointer; color: var(--muted); font-size: 13px; } /* 原始事件按需展开用于排查。 */
+@media (max-width: 480px) { .progress { padding: 12px; } .progress-summary { flex-direction: column; gap: 4px; } .progress-time { text-align: left; } .step-heading { align-items: flex-start; } } /* 窄屏状态与长文本保持可读。 */

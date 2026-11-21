@@ -1,6 +1,9 @@
 package com.agent4.platform; // 使用完整 Spring 安全链和真实数据库验证 API。
 import com.agent4.backend.TaskStore; // 测试通过正式事务完成后台任务。
 import com.agent4.contract.Contracts.Result; // 模拟模型结果，不依赖真实 API。
+import com.agent4.contract.Contracts.ExecutionStep; // 真实持久化步骤协议。
+import com.agent4.backend.TaskProgressStore; // 验证快照水位与事件并发之间的边界。
+import org.springframework.jdbc.core.JdbcTemplate; // 进度投影使用与正式服务相同的数据源。
 import com.fasterxml.jackson.databind.ObjectMapper; // 解析真实响应 JSON。
 import org.springframework.boot.test.context.SpringBootTest; // 启动平台应用上下文。
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc; // 通过 MockMvc 经过全部过滤链。
@@ -21,6 +24,7 @@ import java.util.*; // 唯一账号和 JSON 请求。
 class PlatformApiTest { // 此层验证 API 契约，不能替代真实 Redis 和 RabbitMQ 集成测试。
     @Autowired MockMvc mvc; @Autowired ObjectMapper json; @Autowired TaskStore tasks; // 复用正式服务。
     @MockBean StringRedisTemplate redis; // 外部设施由独立集成测试覆盖。
+    @Autowired JdbcTemplate db; // 用于受控的快照水位测试。
     @BeforeEach void allowRequests() { doReturn(1L).when(redis).execute(any(RedisScript.class), anyList()); } // 默认允许请求，专门的测试再模拟超限。
     String register() throws Exception { // 每个场景创建独立身份，避免跨测试依赖。
         String username = "u" + UUID.randomUUID().toString().replace("-", "").substring(0, 16); // 满足账号格式限制。
@@ -87,4 +91,28 @@ class PlatformApiTest { // 此层验证 API 契约，不能替代真实 Redis �
         doReturn(999L).when(redis).execute(any(RedisScript.class), anyList()); // 模拟其他实例已消耗共享窗口。
         mvc.perform(get("/api/tasks").header("Authorization", "Bearer " + token)).andExpect(status().isTooManyRequests()); // 不能仅靠本地线程池代替限流。
     } // 结束输入与限流测试。
+    ExecutionStep progressStep(int attempt, int position, String status) { long now = System.currentTimeMillis(); return new ExecutionStep("a" + attempt + "-step-" + position, attempt, position, "TOOL", "读取健康状态", status, 1, "read_health", 1, "", "受控读取", now - 100, now, 100); } // 不携带真实参数或模型内容。
+    @Test void progressIsOwnedAndCollapsesRepeatedUpdates() throws Exception { // 越权与重复回放是进度接口的必要契约。
+        mvc.perform(get("/api/tasks/missing/progress")).andExpect(status().isUnauthorized()); String owner = register(), other = register(), id = submit(owner, "progress"); var claim = tasks.claim(id, "worker").orElseThrow(); // 创建真实任务尝试。
+        tasks.append(claim, "step", json.writeValueAsString(progressStep(1, 1, "RUNNING"))); tasks.append(claim, "step", json.writeValueAsString(progressStep(1, 1, "SUCCEEDED"))); // 同一逻辑步骤有两条事件。
+        mvc.perform(get("/api/tasks/" + id + "/progress").header("Authorization", "Bearer " + other)).andExpect(status().isNotFound()); // 不泄露他人任务的步骤或耗时。
+        mvc.perform(get("/api/tasks/missing/progress").header("Authorization", "Bearer " + owner)).andExpect(status().isNotFound()); // 与越权返回相同状态。
+        mvc.perform(get("/api/tasks/" + id + "/progress").header("Authorization", "Bearer " + owner)).andExpect(status().isOk()).andExpect(jsonPath("$.steps.length()").value(1)).andExpect(jsonPath("$.steps[0].status").value("SUCCEEDED")).andExpect(jsonPath("$.lastSeq").value(tasks.get(id).nextSeq())); // 最新状态覆盖更新而非新增一行。
+        mvc.perform(get("/progress.js")).andExpect(status().isOk()).andExpect(content().string(containsString("IncidentProgress"))); // 登录前也能加载必要静态资源。
+    } // 结束权限与状态归并测试。
+    @Test void terminalProgressClosesUnfinishedStepsAndFreezesTime() throws Exception { // 取消、失联或结束缺少完成回调时不能永远运行。
+        String token = register(), id = submit(token, "interrupted"); var claim = tasks.claim(id, "worker").orElseThrow(); tasks.append(claim, "step", json.writeValueAsString(progressStep(1, 1, "RUNNING"))); tasks.finish(claim, new Result(false, null, "停止", 0, 0)); // 模拟尝试终止但没有步骤完成事件。
+        String first = mvc.perform(get("/api/tasks/" + id + "/progress").header("Authorization", "Bearer " + token)).andExpect(status().isOk()).andExpect(jsonPath("$.steps[0].status").value("INTERRUPTED")).andReturn().getResponse().getContentAsString(); // 不凭任务终态推测步骤成功。
+        String second = mvc.perform(get("/api/tasks/" + id + "/progress").header("Authorization", "Bearer " + token)).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(); assertEquals(json.readTree(first).path("steps").get(0).path("elapsedMillis"), json.readTree(second).path("steps").get(0).path("elapsedMillis")); // 历史耗时不随刷新增加。
+    } // 结束开放步骤收尾测试。
+    @Test void progressUsesTaskWatermarkWhenNewEventsArriveLater() throws Exception { // 模拟任务快照与事件查询之间产生新事件。
+        String token = register(), id = submit(token, "watermark"); var claim = tasks.claim(id, "worker").orElseThrow(); tasks.append(claim, "step", json.writeValueAsString(progressStep(1, 1, "RUNNING"))); var snapshot = tasks.get(id); // 保存先读到的水位。
+        tasks.append(claim, "step", json.writeValueAsString(progressStep(1, 1, "SUCCEEDED"))); TaskStore frozen = mock(TaskStore.class); when(frozen.owned(snapshot.userId(), id)).thenReturn(snapshot); // 真实新事件已提交，但本次读任务发生在此前。
+        var progress = new TaskProgressStore(frozen, db, json).progress(snapshot.userId(), id); assertEquals(snapshot.nextSeq(), progress.lastSeq()); assertEquals("RUNNING", progress.steps().get(0).status()); // 不能把未来步骤合并到旧水位响应。
+    } // 结束并发快照一致性测试。
+    @Test void progressBoundsHistoryAndReportsInvalidRecords() throws Exception { // 有界查询和坏数据不能导致无限返回或暴露原文。
+        String token = register(), id = submit(token, "bounded-progress"); var claim = tasks.claim(id, "worker").orElseThrow(); String step = json.writeValueAsString(progressStep(1, 1, "SUCCEEDED")); // 每条更新本身都是完整快照。
+        for (int i = 0; i < 501; i++) tasks.append(claim, "step", step); tasks.append(claim, "step", "{fixture-private-data"); // 超出读取上限并加入一条坏记录。
+        String body = mvc.perform(get("/api/tasks/" + id + "/progress").header("Authorization", "Bearer " + token)).andExpect(status().isOk()).andExpect(jsonPath("$.truncated").value(true)).andExpect(jsonPath("$.incomplete").value(true)).andExpect(jsonPath("$.steps.length()").value(1)).andReturn().getResponse().getContentAsString(); assertFalse(body.contains("fixture-private-data")); // 既标注不完整，也不回显坏记录。
+    } // 结束有界进度与错误记录测试。
 } // 结束平台集成测试。

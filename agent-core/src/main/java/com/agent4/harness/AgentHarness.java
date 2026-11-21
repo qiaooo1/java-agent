@@ -55,6 +55,7 @@ public final class AgentHarness { // 无共享会话状态，同一个实例可�
         ReActAgent agent = prompt == null ? new ReActAgent(model, guarded, request.config()) : new ReActAgent(model, guarded, request.config(), prompt); // 每次创建独立记忆窗口。
         agent.setListener(new AgentListener() { // 检查和记录执行过程，正式答案延后到业务验收通过。
             public void onIterationStart(int step) { control.check(); events.onIterationStart(step); control.check(); } // 监听器可能检查租约，模型调用前再次验证停止信号。
+            public void onModelResponse(int step) { control.check(); events.onModelResponse(step); control.check(); } // 一轮模型响应完成后发布可验证的阶段信息。
             public void onAssistantDelta(String delta) { control.check(); events.onAssistantDelta(delta); } // 流式期间也响应取消与截止时间。
             public void onActionStart(ToolCall call) { control.check(); control.currentCall = call; events.onActionStart(call); } // 保存工具调用标识供后续尝试与重试事件关联。
             public void onObservation(ToolCall call, String observation) { control.check(); events.onObservation(call, observation); } // 记录与模型实际收到一致的观察。
@@ -64,7 +65,8 @@ public final class AgentHarness { // 无共享会话状态，同一个实例可�
         AgentTrace trace = agent.run(request.goal(), control.cancelled); // 复用原有步数、熔断和用量累计逻辑。
         if (trace.status() != AgentTrace.Status.COMPLETED) return new HarnessResult(request.context(), trace, null, trace.error(), control.calls); // 循环失败时不提供正式答案。
         try { // 业务验收属于运行结果的一部分。
-            control.check(); String answer = request.workflow().accept(trace.finalAnswer()); control.check(); // 验收前后都确认运行仍有效。
+            control.check(); events.onValidationStart(); control.check(); // 验收开始是独立步骤，监听器写入仍须有执行权。
+            String answer = request.workflow().accept(trace.finalAnswer()); control.check(); // 验收前后都确认运行仍有效。
             if (answer == null || answer.isBlank()) throw new IllegalArgumentException("业务验收结果不能为空"); // 防止适配器将空结果当作成功。
             events.onFinalAnswer(answer); // 只发布正式验收后的结果。
             return new HarnessResult(request.context(), trace, answer, null, control.calls); // 保留循环轨迹及实际工具预算消耗。
