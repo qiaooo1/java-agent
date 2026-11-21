@@ -6,6 +6,8 @@ import com.agent4.agent.*; // 复用 Agent 引擎和事件回调。
 import com.agent4.harness.*; // 所有任务经过统一运行上下文、策略门禁和结果验收。
 import com.agent4.llm.*; // 每次尝试独立创建可取消客户端。
 import com.agent4.tool.ToolRegistry; // 工具池按执行尝试创建并清理。
+import com.agent4.tool.ToolResult; // 记录每次真实尝试的安全状态。
+import com.agent4.tool.ToolErrorCode; // 重试原因使用稳定枚举。
 import com.agent4.tool.builtin.BasicTools; // 第一版仅开放计算与时间等无外部写副作用工具。
 import com.agent4.worker.diagnosis.*; // 工单 Workflow、只读工具与报告验收独立成模块。
 import com.agent4.contract.DiagnosisPolicy; // 工具配置与任务输入必须相互匹配。
@@ -96,6 +98,8 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
             @Override public void onAssistantDelta(String delta) { if (stop.get()) throw new IllegalStateException("任务已停止"); if (!diagnosis) { pending.append(delta); if (pending.length() >= 256) flush(); } } // 工单最终报告验收前不作为正式结果展示。
             @Override public void onActionStart(ToolCall call) { flush(); tasks.append(claim, "action", call.name() + " " + call.argumentsJson()); } // 监听器只记录尝试，预算和权限由 Harness 工具入口执行。
             @Override public void onObservation(ToolCall call, String observation) { tasks.append(claim, "observation", observation); } // 结果作为可回放事件持久化。
+            @Override public void onToolAttempt(ToolCall call, int attempt, ToolResult result) { tasks.append(claim, "tool_attempt", Json.write(Map.of("tool", call.name() != null && tools.names().contains(call.name()) ? call.name() : "<unknown>", "callId", call.id() == null ? "" : call.id(), "attempt", attempt, "status", result.successful() ? "SUCCEEDED" : "FAILED", "errorCode", result.successful() ? "NONE" : result.error().name()))); } // 调用标识关联多次尝试，不记录原始参数和底层异常消息。
+            @Override public void onToolRetry(ToolCall call, int nextAttempt, ToolErrorCode reason, long delayMillis) { tasks.append(claim, "tool_retry", Json.write(Map.of("tool", call.name(), "callId", call.id() == null ? "" : call.id(), "nextAttempt", nextAttempt, "reason", reason.name(), "delayMillis", delayMillis))); } // 重试前的真实安排可通过 SSE 与事件补读查看。
             @Override public void onFinalAnswer(String answer) { flush(); if (!diagnosis) tasks.append(claim, "answer", answer); } // 工单报告需要额外经过引用与结构验收。
             @Override public void onError(String message) { log.info("agent_stopped taskId={} attemptNo={} reason={}", claim.task().id(), claim.attemptNo(), message); } // 停止后不再强行写入失效事件流。
         }; // 完成监听器装配。

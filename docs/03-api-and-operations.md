@@ -56,6 +56,10 @@
 
 ## SSE 契约
 
+工具恢复沿用现有任务事件查询与 SSE，不增加独立接口。`tool_attempt` 的 `data` 可解析为 JSON，包含 `tool`、`callId`、`attempt`、`status`、`errorCode`；`tool_retry` 包含相同调用标识以及 `nextAttempt`、`reason`、`delayMillis`，表示一次真实安排的重试。重试期间取消或到期可能阻止下一次执行，不能把重试安排视为执行成功。
+
+工具参数或证据来源失败属于已受理异步任务的执行结果，通过任务状态、失败原因和事件查看，不等同于提交接口的 HTTP 400/500。新增恢复事件不包含原始工具参数或异常消息；权限隔离和 Last-Event-ID 补读规则保持一致。
+
 ```text
 id:4
 event:task

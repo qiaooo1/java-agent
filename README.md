@@ -53,6 +53,8 @@ flowchart LR
 4. **验收正式结果**：模型循环完成后调用业务 `accept`；报告引用或格式不合规时不发布正式答案，已知模型用量仍保留。
 5. **记录并结算**：Worker 持久化 `harness` 阶段事件与实际调用次数，随后按原有租约与幂等事务完成结算和消息确认。
 
+工具错误使用结构化分类：参数错误交给后续模型决策纠正；只对服务端声明安全的读取，在瞬时故障时自动重试一次，且每次重试都消耗原有预算。权限拒绝、超时、资源不足等硬性错误直接停止。`tool_attempt` 与 `tool_retry` 记录实际尝试和恢复过程，失败提示不回显原始参数或底层异常消息。详见 [工具故障分类与恢复](docs/07-harness.md#工具故障分类与恢复)。
+
 运行治理位于 [`agent-core` 的 `harness` 包](agent-core/src/main/java/com/agent4/harness)，不依赖 Spring、数据库或 MQ。业务通过 `HarnessWorkflow` 扩展，工具通过 `ToolExecutor` 接入，ReAct 继续负责模型与工具交互循环。流式增量属于过程数据，正式结果事件在验收后发出。
 
 当前失联恢复仍是从持久化输入重新执行一次任务，尚未实现对话或工具执行的中途检查点恢复。运行层负责阻止到期后的新工作与正式结果发布；阻塞调用由工具超时和 Worker 心跳尽力中断。详细接口和边界见 [Harness 设计与接入指南](docs/07-harness.md)。
@@ -145,7 +147,7 @@ docker compose up -d --scale worker=2
 | 前端语法 | `node --check platform-service/src/main/resources/static/app.js` | 浏览器应用的 JavaScript 语法 |
 | 真实模型评估 | `node scripts/evaluate.mjs` | 固定任务集评估；需配置真实模型，拒绝对演示响应评分 |
 
-**最近一次本地默认回归（2026-11-20）**：全模块构建成功，12 个测试套件、68 个测试通过，失败、错误与跳过均为 0。包括 Harness 工具授权、预算、取消、截止时间与验收边界，以及通过 Harness 执行的四个诊断场景。该次运行未启用 Docker 集成测试或真实模型评估，详见[维护日志](docs/maintenance-log.md)。
+**最近一次本地默认回归（2026-11-21）**：全模块构建成功，15 个测试套件、102 个测试通过，失败、错误与跳过均为 0。覆盖工具错误分类、安全重试、退避期间的取消与时限、预算约束、本机 HTTP 故障恢复及 Worker 恢复事件持久化，同时保留原有核心、事务、API 与旧版回归。该次运行未启用 Docker 集成测试或真实模型评估，详见[维护日志](docs/maintenance-log.md)。
 
 [GitHub Actions 工作流](.github/workflows/ci.yml) 已配置推送、PR 和手动触发，自动执行 Java 构建、默认回归和 JavaScript 语法检查。每次云端结果以 Actions 中对应的运行记录为准，测试报告保留七天。
 

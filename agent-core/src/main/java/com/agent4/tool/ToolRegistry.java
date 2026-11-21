@@ -21,7 +21,7 @@ import java.util.concurrent.TimeoutException; // 超时后取消任务并回传�
  * 工具注册中心：注解扫描注册、Schema 汇总、统一调用入口。
  *
  * <p>核心设计 —— {@link #invoke} 永不向上抛异常：任何失败（未知工具、JSON 解析失败、
- * 缺参、执行异常、超时）都转为错误字符串作为 Observation 回传，让 Agent 能自愈重试。</p>
+ * 缺参、执行异常、超时）都转为安全结果；结构化恢复通过 execute 与 Harness 完成。</p>
  */
 public final class ToolRegistry implements ToolExecutor { // 注册中心可由 Harness 组合治理，不允许子类绕过原有校验。
 
@@ -94,57 +94,59 @@ public final class ToolRegistry implements ToolExecutor { // 注册中心可由 
         return invoke(name, argumentsJson, defaultTimeoutMs); // 委托三参实现，避免逻辑分叉。
     } // 重载方法结束。
 
-    public String invoke(String name, String argumentsJson, long timeoutMs) { // 统一入口：返回值即 Observation，永不向上抛异常。
-        try { // 外层兜底，连参数解析等意外都转成错误文本。
-            ToolSpec spec = tools.get(name); // 模型可能编造工具名，必须判空。
-            if (spec == null) { // 未知工具不应让整轮对话失败。
-                return "错误: 未注册的工具 '" + name + "'，可用工具: " + names(); // 列出可用工具，引导模型改写调用。
-            } // 未知工具分支结束。
-            JsonNode root = parseArgs(argumentsJson); // 解析并强制要求 JSON 对象。
-            if (root == null) { // 模型可能返回数组或非法 JSON。
-                return "错误: 参数必须是 JSON 对象，收到: " + Json.truncate(argumentsJson, 120); // 截断回显，避免超长内容污染上下文。
-            } // 参数形状校验结束。
+    public String invoke(String name, String argumentsJson, long timeoutMs) { // 旧接口只保留展示兼容，内部恢复不解析文本。
+        return execute(name, argumentsJson, timeoutMs).legacyObservation(); // 成功数据不变，失败输出安全分类。
+    } // 结束兼容工具入口。
 
-            List<String> missing = new ArrayList<>(); // 收集全部缺失参数，一次告知而非逐个报错。
-            Map<String, Object> values = new LinkedHashMap<>(); // 按声明顺序组装实参，顺序决定反射调用正确性。
-            for (ToolSpec.ParamMeta p : spec.params()) { // 以声明元信息为准遍历，忽略模型多传的键。
-                JsonNode v = root.get(p.name()); // 按名字取值，缺键得到 null。
-                boolean primitive = p.type().isPrimitive(); // 基本类型无法接收 null，缺失即视为必填。
-                if (v == null || v.isNull()) { // JSON null 与缺键等价处理。
-                    if (p.required() || primitive) { // 必填或基本类型不可为空。
-                        missing.add(p.name()); // 记录缺失参数名。
-                    } else { // 可选且为引用类型。
-                        values.put(p.name(), null); // 显式放 null，保证实参数组长度完整。
-                    } // 必填判断结束。
-                } else { // 有实际值。
-                    values.put(p.name(), Json.mapper().convertValue(v, Object.class)); // 先转 Java 原生值，后续按声明类型转换。
-                } // 值处理分支结束。
-            } // 参数遍历结束。
-            if (!missing.isEmpty()) { // 有缺失则不执行工具，避免半截调用。
-                return "错误: 缺少必需参数 " + missing + "，参数定义: " // 回报参数定义，让模型按 Schema 补齐后重试。
-                        + Json.write(spec.parametersSchema()); // 附完整 Schema 作为纠正依据。
-            } // 缺失分支结束。
+    @Override public boolean retrySafe(String name) { // 不把恢复权限暴露为模型可传入的参数。
+        ToolSpec spec = tools.get(name); return spec != null && spec.retrySafe(); // 未注册或未声明一律禁止自动重试。
+    } // 结束恢复能力查询。
 
-            Future<Object> future = executor.submit(() -> spec.call(values)); // 提交到线程池，使超时可以被强制执行。
-            try { // 内层只负责等待与超时处理。
-                return render(future.get(timeoutMs, TimeUnit.MILLISECONDS)); // 阻塞等待结果并在超时前返回。
-            } catch (TimeoutException e) { // 超时视为失败观察，而不是卡死整个 Agent。
-                future.cancel(true); // 尽力中断执行线程，释放资源。
-                return "错误: 工具执行超时（>" + timeoutMs + "ms）"; // 告知超时阈值，便于模型换更轻量的调用。
-            } catch (InterruptedException e) { // 应用关闭或调用线程被取消时停止等待工具。
-                future.cancel(true); // 尽力中断底层工具任务。
-                Thread.currentThread().interrupt(); // 保留中断状态，交由上层决定退出。
-                return "错误: 工具执行已中断"; // 将中断转换为可记录的执行结果。
-            } catch (ExecutionException e) { // 反射调用抛出的异常被包装在此。
-                Throwable cause = e.getCause() == null ? e : e.getCause(); // 解包取工具内部真实异常。
-                return "错误: " + cause.getClass().getSimpleName() + ": " + cause.getMessage(); // 只回传类型与消息，避免堆栈占用上下文。
-            } // 执行异常分支结束。
-        } catch (IllegalArgumentException e) { // 参数转换等非法输入在此兜底。
-            return "错误: " + e.getMessage(); // 转成可重试的观察文本。
-        } catch (Exception e) { // 最后一道兜底，保证 invoke 永不抛异常。
-            return "错误: " + e; // 极端情况下输出异常 toString。
-        } // 外层 try 结束。
-    } // invoke 方法结束。
+    @Override public ToolResult execute(String name, String argumentsJson, long timeoutMs) { // 此处只执行一次，重试由 Harness 的总预算治理。
+        if (Thread.currentThread().isInterrupted()) return ToolResult.failure(ToolErrorCode.CANCELLED); // 中断后不提交新的工具工作。
+        if (timeoutMs < 1) return ToolResult.failure(ToolErrorCode.INVALID_ARGUMENT); // 非正超时不能触发工具执行。
+        ToolSpec spec = tools.get(name); // 工具名只能从服务端注册表解析。
+        if (spec == null) return ToolResult.failure(ToolErrorCode.UNKNOWN_TOOL); // 不回显未知名称或整个工具目录。
+        try { // 参数转换与执行错误均映射为受控结果。
+            JsonNode root; // 参数解析失败不能暴露原始 JSON 片段。
+            try { root = parseArgs(argumentsJson); } catch (RuntimeException invalid) { return ToolResult.failure(ToolErrorCode.INVALID_ARGUMENT); } // 非法 JSON 需要模型修正。
+            if (root == null) return ToolResult.failure(ToolErrorCode.INVALID_ARGUMENT); // 只允许 JSON 对象。
+            Map<String, Object> values = new LinkedHashMap<>(); // 保留方法参数声明顺序。
+            for (ToolSpec.ParamMeta parameter : spec.params()) { // 在任何真实调用前验证必填字段。
+                JsonNode value = root.get(parameter.name()); // 不回显缺失字段的模型原始数据。
+                if (value == null || value.isNull()) { // 缺键和显式 null 一致处理。
+                    if (parameter.required() || parameter.type().isPrimitive()) return ToolResult.failure(ToolErrorCode.INVALID_ARGUMENT); // 拒绝不完整调用。
+                    values.put(parameter.name(), null); // 可选引用类型保持 null。
+                } else values.put(parameter.name(), Json.mapper().convertValue(value, Object.class)); // 实际类型转换由 ToolSpec 完成。
+            } // 完成执行前参数检查。
+            Future<Object> future = executor.submit(() -> spec.call(values)); // 真实调用仍在有界工具线程池中执行。
+            try { // 等待上限由 Harness 剩余运行预算进一步收紧。
+                return ToolResult.success(render(future.get(timeoutMs, TimeUnit.MILLISECONDS))); // 用类型保留正常业务输出。
+            } catch (TimeoutException timeout) { // 超时不保证工具或远端副作用已停止。
+                future.cancel(true); return ToolResult.failure(ToolErrorCode.TIMEOUT); // 明确分类，禁止不确定状态下自动重放。
+            } catch (InterruptedException cancelled) { // 监听线程中断时同时取消底层等待。
+                future.cancel(true); Thread.currentThread().interrupt(); return ToolResult.failure(ToolErrorCode.CANCELLED); // 保留停止信号。
+            } // 方法和类型转换异常交由下方统一解包分类。
+        } catch (Exception failure) { // 不把异常消息、堆栈或凭据放进 Observation。
+            Throwable cause = failure; // 只解包已知的异步与反射包装，不任意追逐业务原因链。
+            while ((cause instanceof ExecutionException || cause instanceof java.lang.reflect.InvocationTargetException) && cause.getCause() != null) cause = cause.getCause(); // 找到工具真实失败类型。
+            ToolErrorCode code = classify(cause); // 分类基于类型或适配器显式错误，而非错误字符串。
+            if (code == ToolErrorCode.EXECUTION_FAILED) System.getLogger(ToolRegistry.class.getName()).log(System.Logger.Level.WARNING, "tool_failed tool={0} type={1}", spec.name(), cause.getClass().getName()); // 服务端只记录工具名和异常类型。
+            return ToolResult.failure(code); // 公共结果只包含常量消息和恢复建议。
+        } // 完成单次真实执行。
+    } // 结束结构化工具入口。
+
+    private static ToolErrorCode classify(Throwable failure) { // 默认内部错误不可自动重试。
+        if (failure instanceof ToolExecutionException typed) return typed.code(); // 受控适配器可以提供更精确的故障类别。
+        if (failure instanceof SecurityException) return ToolErrorCode.PERMISSION_DENIED; // 权限错误不能当参数或网络错误处理。
+        if (failure instanceof java.net.SocketTimeoutException) return ToolErrorCode.TIMEOUT; // 读取超时状态不确定，保守终止。
+        if (failure instanceof InterruptedException) return ToolErrorCode.CANCELLED; // 工具主动中断也终止执行。
+        if (failure instanceof java.util.concurrent.RejectedExecutionException) return ToolErrorCode.RESOURCE_EXHAUSTED; // 线程池关闭或饱和时不忙重试。
+        if (failure instanceof IllegalArgumentException) return ToolErrorCode.INVALID_ARGUMENT; // 包括实际参数类型转换失败。
+        if (failure instanceof java.io.FileNotFoundException || failure instanceof java.nio.file.NoSuchFileException) return ToolErrorCode.EXECUTION_FAILED; // 缺失文件不能靠立即重试修复。
+        if (failure instanceof java.io.IOException) return ToolErrorCode.TRANSIENT_FAILURE; // 只有工具另行声明安全，Harness 才会重试可能的传输故障。
+        return ToolErrorCode.EXECUTION_FAILED; // 未知异常保守失败，禁止暴露内部消息。
+    } // 结束失败分类。
 
     @jakarta.annotation.PreDestroy // 随 Spring 容器关闭工具执行资源。
     public void closeWorkers() { // 独立测试也可显式调用此清理方法。
@@ -169,7 +171,7 @@ public final class ToolRegistry implements ToolExecutor { // 注册中心可由 
         try { // 非字符串值尝试 JSON 序列化。
             return Json.write(result); // 结构化输出便于模型解析字段。
         } catch (Exception e) { // 无法序列化的对象降级处理。
-            return String.valueOf(result); // 退化为 toString，保证始终有结果。
+            throw new ToolExecutionException(ToolErrorCode.INVALID_RESPONSE); // 序列化失败不回显内部对象。
         } // 序列化 try 结束。
     } // render 结束。
 } // 类体结束。

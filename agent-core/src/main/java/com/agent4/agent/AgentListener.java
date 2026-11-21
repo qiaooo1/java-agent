@@ -1,6 +1,8 @@
 package com.agent4.agent; // 事件回调与引擎同包，核心循环通过接口解耦展示层。
 
 import com.agent4.llm.ToolCall; // 只依赖 ToolCall 数据对象，回调侧不必反向依赖引擎实现。
+import com.agent4.tool.ToolResult; // 每次实际执行尝试有独立的结构化结果。
+import com.agent4.tool.ToolErrorCode; // 重试事件不包含底层异常原文。
 
 /**
  * Agent 执行过程的事件回调。UI 层实现此接口观察每一步，
@@ -9,6 +11,8 @@ import com.agent4.llm.ToolCall; // 只依赖 ToolCall 数据对象，回调侧�
  * <p>所有方法都有 default 空实现，只需覆写关心的事件。</p>
  */
 public interface AgentListener { // 所有方法都是 default 空实现，新增事件不会破坏已有实现类。
+    default void onToolAttempt(ToolCall call, int attempt, ToolResult result) {} // 一次模型调用可包含多次受控物理尝试。
+    default void onToolRetry(ToolCall call, int nextAttempt, ToolErrorCode reason, long delayMillis) {} // 先记录真实重试安排，再等待并重新检查执行权。
 
     /** 一轮 ReAct 迭代开始。 */
     default void onIterationStart(int step) { // 每轮迭代开始回调，step 从 1 递增，UI 可据此显示进度。

@@ -10,6 +10,12 @@ import java.util.Optional; // 模拟领取竞争失败。
 import org.springframework.test.util.ReflectionTestUtils; // 为未启动 Spring 的消费者注入服务端运行时配置。
 import org.mockito.ArgumentCaptor; // 校验持久化结算使用的是 Harness 正式结果。
 import static org.junit.jupiter.api.Assertions.*; // 验证业务成功与结果内容。
+import com.agent4.contract.DiagnosisPolicy; // 使用当前正式诊断工具版本。
+import com.sun.net.httpserver.HttpServer; // 本机证据源覆盖实际 Worker 的恢复接线。
+import java.net.InetSocketAddress; // 不占用固定端口或公网地址。
+import java.nio.charset.StandardCharsets; // 测试响应以 UTF-8 编码。
+import java.util.Map; // 构造安全合成证据。
+import java.util.concurrent.atomic.AtomicInteger; // HTTP 线程与测试线程共享请求计数。
 class TaskConsumerTest { // 不需要额外部署消息服务。
     Message message(byte[] body) { MessageProperties properties = new MessageProperties(); properties.setDeliveryTag(7); return new Message(body, properties); } // 固定投递标识便于断言。
     @Test void malformedMessageIsDeadLettered() throws Exception { // 非 JSON 消息不能无限重投。
@@ -41,4 +47,26 @@ class TaskConsumerTest { // 不需要额外部署消息服务。
             verify(slots).release(eq("user"), anyString()); // 统一运行层没有改变共享容量释放责任。
         } finally { consumer.close(); } // 清理消费者的心跳执行器。
     } // 结束 Worker 与 Harness 接线回归。
+    @Test void recoveredDiagnosisPersistsAttemptAndRetryEventsBeforeAcknowledging() throws Exception { // 验证恢复不是只在核心单元测试中生效。
+        AtomicInteger requests = new AtomicInteger(); HttpServer source = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0); ObjectMapper json = new ObjectMapper(); // 仅启动本机临时来源。
+        source.createContext("/v1/", exchange -> { // 第一次读取失败，随后提供足够完成演示调查的证据。
+            if (requests.incrementAndGet() == 1) { exchange.sendResponseHeaders(503, -1); exchange.close(); return; } // 第一次失败不得产生证据。
+            String kind = exchange.getRequestURI().getPath().split("/")[3]; // 工具使用固定的演示环境。
+            Object data = kind.equals("metrics") ? Map.of("consumers", 0, "brokerConnected", true, "slotsUsed", 0, "slotsLimit", 8, "incomplete", false) : Map.of("message", "bounded observation"); // 合成现场不是生产结果。
+            byte[] body = json.writeValueAsBytes(Map.of("environment", "demo-a", "synthetic", true, "data", data)); exchange.sendResponseHeaders(200, body.length); exchange.getResponseBody().write(body); exchange.close(); // 真实工具负责解析并记录引用。
+        }); source.start(); // 准备 Worker 可访问的证据端点。
+        TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); Task task = mock(Task.class); // 替换持久化和消息边界。
+        when(task.id()).thenReturn("incident"); when(task.userId()).thenReturn("user"); when(task.traceId()).thenReturn("trace"); when(task.state()).thenReturn("QUEUED"); Claim claim = new Claim(task, 1, "worker"); // 固定本次执行凭证。
+        when(tasks.get("incident")).thenReturn(task); when(tasks.claim(eq("incident"), anyString())).thenReturn(Optional.of(claim)); when(slots.acquire(eq("user"), anyString())).thenReturn(true); // 允许正式领取。
+        when(tasks.readSettings(task)).thenReturn(new AgentSettings("test-model", 2048, DiagnosisPolicy.VERSION)); when(tasks.readInput(task)).thenReturn(new Submit("调查任务排队", null, 8, new DiagnosisScope("demo-workbench", "demo-a", "2026-11-05T01:00:00Z", "2026-11-05T01:15:00Z"))); // 使用服务端范围和配置。
+        when(tasks.heartbeat(claim)).thenReturn(true); when(slots.refresh(eq("user"), anyString())).thenReturn(true); when(tasks.finish(eq(claim), any())).thenReturn(true); // 执行权始终有效。
+        TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json); ReflectionTestUtils.setField(consumer, "maxRuntime", 30); ReflectionTestUtils.setField(consumer, "diagnosisSource", "http://127.0.0.1:" + source.getAddress().getPort()); // 使用规则演示客户端，不连接真实供应商。
+        try { // 故障和恢复均经过实际 TaskConsumer.execute。
+            consumer.consume(message(json.writeValueAsBytes(new Dispatch(1, "incident", "trace"))), channel); // 包括安全重试、报告验收与结果结算。
+            ArgumentCaptor<Result> result = ArgumentCaptor.forClass(Result.class); verify(tasks).finish(eq(claim), result.capture()); assertTrue(result.getValue().success()); assertEquals(4, json.readTree(result.getValue().answer()).path("evidence").size()); assertEquals(5, requests.get()); // 失败尝试没有变成重复证据。
+            ArgumentCaptor<String> retry = ArgumentCaptor.forClass(String.class); verify(tasks).append(eq(claim), eq("tool_retry"), retry.capture()); assertEquals("TRANSIENT_FAILURE", json.readTree(retry.getValue()).path("reason").asText()); assertEquals(2, json.readTree(retry.getValue()).path("nextAttempt").asInt()); // 持久化真实恢复安排。
+            verify(tasks, times(5)).append(eq(claim), eq("tool_attempt"), anyString()); // 四次成功与一次失败都留下安全状态。
+            var order = inOrder(tasks, channel); order.verify(tasks).finish(eq(claim), any()); order.verify(channel).basicAck(7, false); verify(slots).release(eq("user"), anyString()); // 原有消息确认和容量释放不被改变。
+        } finally { consumer.close(); source.stop(0); } // 清理心跳与本机 HTTP 服务。
+    } // 结束 Worker 实际恢复接线场景。
 } // 结束 Worker 边界测试。

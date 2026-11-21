@@ -6,6 +6,9 @@ import com.agent4.llm.ChatResponse; // 读取响应中的用量用于轨迹统�
 import com.agent4.llm.LLMClient; // 具体客户端由上层注入，引擎不感知 HTTP 与鉴权细节。
 import com.agent4.llm.ToolCall; // 工具调用仅作为数据载体，携带名称、参数与配对 id。
 import com.agent4.tool.ToolExecutor; // 执行器负责声明与调用，可由 Harness 增加权限和预算。
+import com.agent4.tool.ToolResult; // 使用类型判断成功与失败，不解析输出内容。
+import com.agent4.tool.ToolExecutionException; // 硬性执行错误必须停止当前循环。
+import com.agent4.tool.ToolErrorCode; // 取消与其他工具错误使用统一分类。
 
 import java.util.ArrayList; // 仅需可增长列表收集本轮的多个工具步骤。
 import java.util.List; // 对外仍返回 List，内部用 ArrayList 累积。
@@ -97,7 +100,7 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
         int consecutiveFailures = 0; // 连续失败计数跨迭代累计，任一步成功即清零。
         try { // try 包裹整个循环，异常统一转成 ERROR 轨迹而非抛给调用方。
             for (int step = 1; step <= config.maxIterations(); step++) { // 步数从 1 开始并受上限约束，循环结束仍无答案即视为未收敛。
-                if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean()) throw new IllegalStateException("任务已中断或取消"); // 每轮开始前阻止新的付费调用。
+                if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean()) throw new ToolExecutionException(ToolErrorCode.CANCELLED); // 每轮开始前阻止新的付费调用。
                 listener.onIterationStart(step); // 迭代开始事件不含敏感内容，UI 可安全展示进度。
 
                 ChatRequest request = new ChatRequest( // 每轮重新装配请求：窗口随迭代增长，工具清单保持一致。
@@ -119,14 +122,16 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
                 List<AgentTrace.StepRecord.ToolStep> toolSteps = new ArrayList<>(); // 仅保存本轮工具子步骤，随 StepRecord 一起落盘。
                 boolean anySuccess = false; // 标记本轮是否至少一个工具成功，用于决定连续失败计数。
                 for (ToolCall call : response.toolCalls()) { // 依次执行本轮全部工具调用，模型可能一次请求多个。
-                    if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean()) throw new IllegalStateException("任务已中断或取消"); // 同一轮多工具调用之间也必须检查取消。
+                    if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean()) throw new ToolExecutionException(ToolErrorCode.CANCELLED); // 同一轮多工具调用之间也必须检查取消。
                     listener.onActionStart(call); // 工具开始事件在真正执行前发出，便于 UI 显示正在调用。
-                    String observation = tools.invoke(call.name(), call.argumentsJson(), config.toolTimeoutMs()); // 工具层内部消化超时与异常，返回错误文本而不抛出。
+                    ToolResult result = tools.execute(call.name(), call.argumentsJson(), config.toolTimeoutMs()); // 工具层提供可靠分类与安全观察。
+                    String observation = result.observation(); // 成功数据原样传递，失败使用结构化 JSON。
                     toolSteps.add(new AgentTrace.StepRecord.ToolStep(call.name(), call.argumentsJson(), observation)); // 原始参数与观察结果都记录，复盘时能还原模型看到的输入。
-                    anySuccess |= !observation.startsWith("错误"); // 以错误前缀判定失败，与工具层约定一致；任一步成功即本轮有效。
+                    anySuccess |= result.successful(); // 正常业务内容包含“错误”也不应误触发熔断。
                     listener.onObservation(call, observation); // 先回调再入记忆，保证 UI 与模型看到同一份文本。
                     memory.add(ChatMessage.toolResult( // 工具结果消息必须以调用 id 与 assistant 消息配对。
                             call.id() == null ? call.name() : call.id(), observation)); // 缺少 id 时退化为工具名，兼容简易实现但可能降低配对准确度。
+                    if (!result.successful() && result.error().terminal()) throw new ToolExecutionException(result.error()); // 旧版直接使用注册表也不能在硬性错误后继续执行。
                 } // 结束本轮工具调用循环。
                 trace.addStep(new AgentTrace.StepRecord(step, response.content(), toolSteps)); // 整轮记录一次性写入轨迹，包含思考文本与全部工具步骤。
 

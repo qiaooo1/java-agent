@@ -51,6 +51,7 @@ public final class ToolSpec { // final：元信息不可变，注册后不应被
     public String name() { // 暴露工具名供注册表索引。
         return name; // 返回固定名称。
     } // name 方法结束。
+    public boolean retrySafe() { return method.getAnnotation(Tool.class).retrySafe(); } // 恢复权限来自工具作者，不能由模型参数开启。
 
     public String description() { // 暴露描述用于生成工具清单。
         return description; // 返回描述文本。

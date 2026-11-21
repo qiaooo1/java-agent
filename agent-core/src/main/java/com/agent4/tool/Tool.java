@@ -18,4 +18,5 @@ public @interface Tool { // @interface 生成可被反射读取的注解类型�
 
     /** 工具功能描述，进入模型工具清单，质量直接影响模型选型准确率。 */
     String description(); // 无默认值即必填，强制作者写清用途。
+    boolean retrySafe() default false; // 只有服务端明确声明可安全重放的工具才允许瞬时故障自动重试。
 } // 注解类型结束。

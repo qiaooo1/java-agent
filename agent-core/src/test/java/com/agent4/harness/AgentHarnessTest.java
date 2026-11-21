@@ -39,14 +39,14 @@ class AgentHarnessTest { // 同一 Harness 支持多次独立运行。
     ChatResponse calls(ToolCall... calls) { return new ChatResponse(null, List.of(calls), new ChatResponse.Usage(5, 2)); } // 一轮可请求多个工具。
     ToolCall call(String name, String args) { return new ToolCall(UUID.randomUUID().toString(), name, args); } // 使用不同调用标识保持协议配对。
     @Test void unapprovedToolIsHiddenAndCannotExecute() { // 校验声明过滤和实际执行门禁两层授权。
-        Probe probe = new Probe(null); ToolRegistry tools = new ToolRegistry().register(probe); List<String> observations = new ArrayList<>(); // 故意把未授权工具也注册进底层。
+        Probe probe = new Probe(null); ToolRegistry tools = new ToolRegistry().register(probe); List<ToolResult> attempts = new ArrayList<>(); // 故意把未授权工具也注册进底层。
         LLMClient model = model(calls(call("forbidden", "{}")), answer()); // 模型忽略声明并尝试越权。
         try { // 工具池由调用方负责清理。
-            AgentListener listener = new AgentListener() { public void onObservation(ToolCall call, String text) { observations.add(text); } }; // 记录模型实际收到的拒绝信息。
+            AgentListener listener = new AgentListener() { public void onToolAttempt(ToolCall call, int attempt, ToolResult result) { attempts.add(result); } }; // 权限拒绝有结构化事件，但不允许模型继续尝试。
             HarnessResult result = new AgentHarness().run(request(workflow(Set.of("allowed"), 2, Duration.ofMinutes(1), UnaryOperator.identity())), model, tools, listener, () -> false); // 白名单不含 forbidden。
-            assertTrue(result.successful(), result.error()); assertEquals(1, result.toolCalls()); assertEquals(0, probe.forbidden.get()); // 越权尝试扣预算但没有副作用。
-            assertTrue(observations.get(0).contains("未获")); // 拒绝作为观察返回，允许模型调整行动。
-            var capture = org.mockito.ArgumentCaptor.forClass(ChatRequest.class); verify(model, times(2)).chatStream(capture.capture(), any()); // 检查真正交给模型的输入。
+            assertFalse(result.successful()); assertTrue(result.error().contains("PERMISSION_DENIED")); assertEquals(1, result.toolCalls()); assertEquals(0, probe.forbidden.get()); // 越权尝试扣预算并停止，没有副作用。
+            assertEquals(ToolErrorCode.PERMISSION_DENIED, attempts.get(0).error()); // 拒绝按类型处理，不交给模型寻找绕过方式。
+            var capture = org.mockito.ArgumentCaptor.forClass(ChatRequest.class); verify(model, times(1)).chatStream(capture.capture(), any()); // 权限错误后不能再请求模型。
             assertEquals(List.of("allowed"), capture.getAllValues().get(0).tools().stream().map(node -> node.path("function").path("name").asText()).toList()); // 底层多余工具不能通过声明泄露。
         } finally { tools.closeWorkers(); } // 失败时也不遗留线程池。
     } // 结束工具授权场景。
