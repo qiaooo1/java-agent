@@ -78,9 +78,8 @@ public class TaskStore { // 第一版使用共享数据库，不伪装为独立�
         return db.query("SELECT * FROM task WHERE id=?", taskMapper, id).stream().findFirst().orElseThrow(() -> new BusinessException(404, "任务不存在")); // 使用统一的不存在错误。
     } // 结束内部查询。
     public Task owned(String user, String id) { // 用户侧的每次访问都检查归属。
-        Task task = get(id); // 读取任务快照。
-        if (!task.userId().equals(user)) throw new BusinessException(404, "任务不存在"); // 不向其他用户泄露资源存在性。
-        return task; // 仅返回已授权任务。
+        return db.query("SELECT * FROM task WHERE id=? AND user_id=?", taskMapper, id, user)
+                .stream().findFirst().orElseThrow(() -> new BusinessException(404, "任务不存在"));
     } // 结束归属校验。
     public IncidentReview incident(String user, String id) { // 工单查询复用任务归属，不接受客户端自报用户。
         Task task = owned(user, id); // 先鉴权，避免通过工单状态泄露其他用户资源。
@@ -90,7 +89,7 @@ public class TaskStore { // 第一版使用共享数据库，不伪装为独立�
     public IncidentReview reviewIncident(String user, String id, String decision, String note) { // 人工动作不执行重启或其他修复。
         if (!("CONFIRMED".equals(decision) || "ESCALATED".equals(decision)) || note == null || note.isBlank() || note.length() > 1000) throw new BusinessException(400, "请选择确认或转交，并填写不超过一千字的说明"); // 所有人工动作留理由。
         return tx.execute(status -> { // 与任务完成和其他人工操作竞争同一任务锁。
-            Task task = locked(id); // 锁顺序与任务状态机一致。
+            Task task = ownedLocked(user, id); // 用户侧写操作在 SQL 中限定所有者。
             IncidentReview previous = incident(user, id); // 在锁内检查归属和工单类型。
             if (!(Contracts.terminal(task.state())) || (decision.equals("CONFIRMED") && !task.state().equals("SUCCEEDED"))) throw new BusinessException(409, "调查结束后可转交，只有成功生成报告才可确认"); // 失败工单允许转交，不允许伪确认。
             if (!previous.state().equals("PENDING")) { // 重复请求可安全重试，但不能覆盖既有处理结论。
@@ -152,8 +151,7 @@ public class TaskStore { // 第一版使用共享数据库，不伪装为独立�
     } // 结束执行完成处理。
     public Task cancel(String user, String id) { // 用户接口只表达取消意图。
         return tx.execute(status -> { // 取消与领取竞争同一任务行锁。
-            Task task = locked(id); // 锁定当前状态。
-            if (!task.userId().equals(user)) throw new BusinessException(404, "任务不存在"); // 再次保护资源归属。
+            Task task = ownedLocked(user, id); // 用户和任务同时约束锁定读取。
             if (Contracts.terminal(task.state())) return task; // 已终结任务不回退状态。
             if (task.state().equals("QUEUED") || task.state().equals("RETRY_WAIT")) settleLocked(task, "CANCELLED", new Result(false, null, "排队任务已取消", 0, 0)); // 未执行任务可以立即确认取消。
             else { // 在途任务由 Worker 或租约恢复器确认终态。
@@ -203,6 +201,10 @@ public class TaskStore { // 第一版使用共享数据库，不伪装为独立�
         String period = YearMonth.from(now().atOffset(ZoneOffset.UTC)).toString(); // 使用数据库时间确定 UTC 月份。
         return db.query("SELECT * FROM quota_account WHERE user_id=? AND billing_period=?", (r, n) -> new Account(r.getInt("limit_tasks"), r.getInt("used_tasks"), r.getInt("reserved_tasks"), period), user, period).stream().findFirst().orElse(new Account(monthlyLimit, 0, 0, period)); // 无账户表示尚未发生提交。
     } // 结束账户查询。
+    private Task ownedLocked(String user, String id) {
+        return db.query("SELECT * FROM task WHERE id=? AND user_id=? FOR UPDATE", taskMapper, id, user)
+                .stream().findFirst().orElseThrow(() -> new BusinessException(404, "任务不存在"));
+    }
     private Task locked(String id) { // 只能在事务内使用的锁定读取。
         return db.query("SELECT * FROM task WHERE id=? FOR UPDATE", taskMapper, id).stream().findFirst().orElseThrow(() -> new BusinessException(404, "任务不存在")); // 行锁保护状态和事件序号。
     } // 结束锁定读取。

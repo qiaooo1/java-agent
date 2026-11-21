@@ -11,13 +11,13 @@ public class TaskController { // 任务执行永远不阻塞提交接口。
     private final TaskStore tasks; // 复用有事务保证的任务仓储。
     public TaskController(TaskStore tasks) { this.tasks = tasks; } // 构造器注入。
     @PostMapping("/tasks") // 首次和幂等重试均返回同一个任务对象。
-    public Task submit(@AuthenticationPrincipal Jwt user, @RequestHeader("Idempotency-Key") String key, @RequestBody Submit input) { return tasks.submit(user.getSubject(), key, input); } // 用户身份来自验签令牌。
+    public TaskView submit(@AuthenticationPrincipal Jwt user, @RequestHeader("Idempotency-Key") String key, @RequestBody Submit input) { return TaskView.from(tasks.submit(user.getSubject(), key, input)); } // 用户身份来自验签令牌。
     @GetMapping("/tasks") // 请求下一页时传回上一页最后一条的 id。
-    public List<Task> list(@AuthenticationPrincipal Jwt user, @RequestParam(required = false) String before, @RequestParam(defaultValue = "20") int limit) { return tasks.list(user.getSubject(), before, limit); } // 查询始终带用户范围。
+    public List<TaskView> list(@AuthenticationPrincipal Jwt user, @RequestParam(required = false) String before, @RequestParam(defaultValue = "20") int limit) { return tasks.list(user.getSubject(), before, limit).stream().map(TaskView::from).toList(); } // 查询始终带用户范围。
     @GetMapping("/tasks/{id}") // 返回状态、结果、账期与 traceId。
-    public Task detail(@AuthenticationPrincipal Jwt user, @PathVariable String id) { return tasks.owned(user.getSubject(), id); } // 越权访问返回与不存在相同的错误。
+    public TaskView detail(@AuthenticationPrincipal Jwt user, @PathVariable String id) { return TaskView.from(tasks.owned(user.getSubject(), id)); } // 越权访问返回与不存在相同的错误。
     @PostMapping("/tasks/{id}/cancel") // 运行中任务只进入取消请求状态。
-    public Task cancel(@AuthenticationPrincipal Jwt user, @PathVariable String id) { return tasks.cancel(user.getSubject(), id); } // 不允许控制器直接写 CANCELLED。
+    public TaskView cancel(@AuthenticationPrincipal Jwt user, @PathVariable String id) { return TaskView.from(tasks.cancel(user.getSubject(), id)); } // 不允许控制器直接写 CANCELLED。
     @GetMapping("/tasks/{id}/events") // 普通 JSON 补读接口方便调试与测试。
     public List<Event> events(@AuthenticationPrincipal Jwt user, @PathVariable String id, @RequestParam(defaultValue = "0") int after) { return tasks.events(user.getSubject(), id, Math.max(0, after)); } // 单批最多一百个事件。
     @GetMapping("/quota") // 按当前 UTC 自然月展示次数额度。

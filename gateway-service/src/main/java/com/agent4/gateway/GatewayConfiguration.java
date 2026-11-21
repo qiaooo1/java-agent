@@ -8,6 +8,8 @@ import org.springframework.security.web.server.SecurityWebFilterChain; // 网关
 import org.springframework.security.oauth2.jwt.*; // 验证标准 JWT。
 import org.springframework.security.oauth2.jose.jws.MacAlgorithm; // 固定 HS256。
 import javax.crypto.spec.SecretKeySpec; // 构造 HMAC 密钥。
+import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
+import java.time.Instant;
 import java.nio.charset.StandardCharsets; // 与平台一致的 UTF-8 编码。
 @Configuration // 网关不信任客户端自报用户头。
 public class GatewayConfiguration { // 不为每个服务引入注册中心，Compose DNS 足够验证当前规模。
@@ -18,10 +20,19 @@ public class GatewayConfiguration { // 不为每个服务引入注册中心，Co
         byte[] bytes = secret.getBytes(StandardCharsets.UTF_8); // 统一字节表示。
         if (bytes.length < 32) throw new IllegalArgumentException("JWT_SECRET 至少需要 32 字节"); // 弱密钥在启动时失败。
         NimbusReactiveJwtDecoder decoder = NimbusReactiveJwtDecoder.withSecretKey(new SecretKeySpec(bytes, "HmacSHA256")).macAlgorithm(MacAlgorithm.HS256).build(); // 使用成熟 JOSE 校验实现。
-        decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer("agent-workbench")); // 同时校验过期时间与发行者。
+        decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
+                JwtValidators.createDefaultWithIssuer("agent-workbench"),
+                new JwtClaimValidator<String>("sub", value -> value != null && !value.isBlank() && value.length() <= 36 && value.equals(value.trim())),
+                new JwtClaimValidator<Instant>("exp", value -> value != null))); // 同时校验过期时间与发行者。
         return decoder; // 安全链从验签结果构造身份。
     } // 结束网关验签器。
     @Bean SecurityWebFilterChain security(ServerHttpSecurity http) { // 网关承担入口保护，平台承担最终资源授权。
-        return http.csrf(csrf -> csrf.disable()).authorizeExchange(auth -> auth.pathMatchers("/", "/index.html", "/app.js", "/progress.js", "/styles.css", "/favicon.ico", "/api/auth/**", "/actuator/health").permitAll().anyExchange().authenticated()).oauth2ResourceServer(oauth -> oauth.jwt(jwt -> {})).build(); // 静态脚本白名单与平台一致，业务进度接口继续验签。
+        return http.csrf(csrf -> csrf.disable())
+                .securityContextRepository(org.springframework.security.web.server.context.NoOpServerSecurityContextRepository.getInstance())
+                .requestCache(cache -> cache.requestCache(org.springframework.security.web.server.savedrequest.NoOpServerRequestCache.getInstance()))
+                .headers(headers -> headers
+                        .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"))
+                        .referrerPolicy(referrer -> referrer.policy(org.springframework.security.web.server.header.ReferrerPolicyServerHttpHeadersWriter.ReferrerPolicy.NO_REFERRER)))
+                .authorizeExchange(auth -> auth.pathMatchers("/", "/index.html", "/app.js", "/progress.js", "/styles.css", "/favicon.ico", "/api/auth/**", "/actuator/health").permitAll().anyExchange().authenticated()).oauth2ResourceServer(oauth -> oauth.jwt(jwt -> {})).build(); // 静态脚本白名单与平台一致，业务进度接口继续验签。
     } // 结束安全链。
 } // 结束网关配置。

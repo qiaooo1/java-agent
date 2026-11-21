@@ -20,6 +20,10 @@
 
 ## 接口
 
+用户侧任务响应采用 `TaskView` 白名单：`id`、`inputJson`、`state`、`attemptNo`、`cancelRequested`、`answer`、`error`、`billingPeriod`、`traceId`、`createdAt`、`nextSeq`。任务和工单提交、幂等重试、列表、详情及取消均不返回内部 `userId`、`requestKey`、`agentConfigJson`、`workerId`、`leaseUntil`、`maxAttempts`。原有页面和仓库脚本使用的业务字段保留；直接依赖已移除内部字段的自定义客户端需要调整。
+
+网关与平台要求 JWT 包含有效身份和过期时间；伪造用户头不能改变资源范围。任务、文档、额度和工单按用户隔离，越权与不存在均返回相同的 404。浏览器响应设置同源 CSP、`no-referrer`，API 沿用 `no-store`；SSE 仍可通过同源 fetch 携带 Bearer 令牌。详细边界与验证见[数据安全与用户隔离](08-data-isolation.md)。
+
 | 方法与路径 | 请求/说明 |
 |---|---|
 | `POST /api/auth/register` | `username`、`password`，返回 accessToken |

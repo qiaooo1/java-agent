@@ -45,6 +45,8 @@ Windows 自动选择已安装的 Edge 或 Chrome，也可通过 `PROGRESS_BROWSE
 
 ## 必须覆盖的故障
 
+数据安全回归见 `DataIsolationApiTest`、`KnowledgeIsolationTest`、`TaskKnowledgeToolTest` 和 `GatewayJwtTest`：覆盖真实两用户身份、跨用户读写拒绝及无副作用、公开响应字段、文档检索范围、工具权限拒绝、JWT 必需字段与安全响应头。这些 Java 测试已纳入默认 `verify`，不需要真实模型。
+
 1. 相同幂等键同时提交，只生成一个任务、一次预留、一个初始 Outbox。
 2. 多 Worker 竞争，只产生一个当前执行尝试。
 3. Broker 拒绝或无路由：Outbox 不标记 SENT。

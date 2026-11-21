@@ -26,8 +26,9 @@ public class KnowledgeStore { // 明确限制单文档规模，避免伪装成�
     public List<Map<String, Object>> list(String user) { return db.queryForList("SELECT id,title,created_at FROM knowledge_document WHERE user_id=? ORDER BY created_at DESC LIMIT 100", user); } // 列表不泄露其他用户文档。
     public List<Hit> search(String user, String document, String query, int limit) { // 任务中的知识工具绑定到授权文档。
         if (db.queryForObject("SELECT COUNT(*) FROM knowledge_document WHERE id=? AND user_id=?", Integer.class, document, user) == 0) throw new BusinessException(404, "知识文档不存在"); // Worker 也必须校验归属。
+        if (query == null || query.isBlank() || query.length() > 2000) throw new BusinessException(400, "检索文本不能为空且不能超过两千字符");
         double[] vector = embedding.embed(query); // 为查询计算相同算法的向量。
-        List<Hit> hits = db.query("SELECT content,vector_json FROM knowledge_chunk WHERE document_id=?", (r, n) -> new Hit(r.getString("content"), embedding.cosine(vector, decode(r.getString("vector_json")))), document); // 仅扫描当前文档，不扫描全平台知识。
+        List<Hit> hits = db.query("SELECT c.content,c.vector_json FROM knowledge_chunk c JOIN knowledge_document d ON d.id=c.document_id WHERE c.document_id=? AND d.user_id=? ORDER BY c.chunk_no", (r, n) -> new Hit(r.getString("content"), embedding.cosine(vector, decode(r.getString("vector_json")))), document, user); // 仅扫描当前文档，不扫描全平台知识。
         return hits.stream().filter(hit -> hit.score() >= 0.15).sorted(Comparator.comparingDouble(Hit::score).reversed()).limit(Math.max(1, Math.min(limit, 5))).toList(); // 阈值是可调整的启发式，需要任务集评估，不能宣称语义模型效果。
     } // 结束受限检索。
     private String encode(double[] vector) { try { return json.writeValueAsString(vector); } catch (Exception e) { throw new IllegalStateException("向量编码失败", e); } } // 编码失败阻止不完整文档提交。
