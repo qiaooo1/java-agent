@@ -120,7 +120,7 @@ public class TaskStore { // 第一版使用共享数据库，不伪装为独立�
             Timestamp available = db.queryForObject("SELECT available_at FROM task WHERE id=?", Timestamp.class, id); // 消息可能提前或重复到达。
             if (!(task.state().equals("QUEUED") || task.state().equals("RETRY_WAIT")) || available.toInstant().isAfter(time)) return Optional.empty(); // 终态、已领取和未到期任务都不执行。
             int attempt = task.attemptNo() + 1; // 递增执行编号，旧 Worker 不能写入新尝试。
-            db.update("UPDATE task SET state='RUNNING',attempt_no=?,worker_id=?,lease_until=? WHERE id=?", attempt, worker, Timestamp.from(time.plusSeconds(leaseSeconds)), id); // 绑定执行者和租约。
+            db.update("UPDATE task SET state='RUNNING',attempt_no=?,worker_id=?,lease_until=?,capacity_deferrals=0 WHERE id=?", attempt, worker, Timestamp.from(time.plusSeconds(leaseSeconds)), id); // 绑定执行者和租约。
             db.update("INSERT INTO task_attempt(task_id,attempt_no,worker_id,state,started_at) VALUES(?,?,?,'RUNNING',?)", id, attempt, worker, Timestamp.from(time)); // 完整保留每次尝试。
             appendLocked(get(id), attempt, "running", "开始第 " + attempt + " 次执行"); // 事件也携带执行编号。
             return Optional.of(new Claim(get(id), attempt, worker)); // 返回执行凭证而非仅返回布尔值。
@@ -161,17 +161,27 @@ public class TaskStore { // 第一版使用共享数据库，不伪装为独立�
             return get(id); // 返回最新业务状态。
         }); // 完成取消事务。
     } // 结束取消接口。
-    public void defer(String id) { // Redis 槽位不足时延迟任务，避免消息立即重投形成忙循环。
-        tx.executeWithoutResult(status -> { // 与重复消息竞争时只允许一个分支重新安排。
-            Task task = locked(id); // 领取前先确认当前仍可等待。
-            if (!(task.state().equals("QUEUED") || task.state().equals("RETRY_WAIT"))) return; // 不能修改执行中或终态任务。
-            Instant time = now().plusSeconds(2); // 小幅退避，为其他用户腾出消费机会。
-            Timestamp available = db.queryForObject("SELECT available_at FROM task WHERE id=?", Timestamp.class, id); // 防止重复消息不断延后已有退避。
-            if (available.toInstant().isAfter(now())) return; // 已有延迟通知时无需重复创建。
-            db.update("UPDATE task SET state='RETRY_WAIT',available_at=? WHERE id=?", Timestamp.from(time), id); // 这次延迟不消耗执行尝试编号。
-            enqueue(task, time); // 与状态修改一起生成新的可靠通知。
-        }); // 完成重新安排。
-    } // 结束容量退避。
+    public boolean readyForExecution(String id) {
+        return db.queryForObject("SELECT COUNT(*) FROM task WHERE id=? AND state IN ('QUEUED','RETRY_WAIT') AND available_at<=CURRENT_TIMESTAMP", Integer.class, id) == 1;
+    }
+    public boolean defer(String id, String reason) {
+        if (!("USER_LIMIT".equals(reason) || "PROVIDER_LIMIT".equals(reason))) throw new IllegalArgumentException("容量等待原因无效");
+        return Boolean.TRUE.equals(tx.execute(status -> {
+            Task task = locked(id);
+            if (!(task.state().equals("QUEUED") || task.state().equals("RETRY_WAIT"))) return false;
+            Instant current = now();
+            Timestamp available = db.queryForObject("SELECT available_at FROM task WHERE id=?", Timestamp.class, id);
+            if (available.toInstant().isAfter(current)) return false;
+            int previous = db.queryForObject("SELECT capacity_deferrals FROM task WHERE id=?", Integer.class, id);
+            long delay = CapacityBackoff.delayMillis(previous);
+            int count = Math.min(previous, 30) + 1;
+            Instant retryAt = current.plusMillis(delay);
+            db.update("UPDATE task SET state='RETRY_WAIT',available_at=?,capacity_deferrals=? WHERE id=?", Timestamp.from(retryAt), count, id);
+            appendLocked(task, task.attemptNo(), "capacity_wait", encode(Map.of("reason", reason, "delayMillis", delay, "availableAt", retryAt.toString(), "deferrals", count)));
+            enqueue(task, retryAt);
+            return true;
+        }));
+    }
     public int recoverExpired() { // 多平台实例可以同时扫描，但逐条恢复必须持有行锁。
         List<String> ids = db.queryForList("SELECT id FROM task WHERE state IN ('RUNNING','CANCEL_REQUESTED') AND lease_until<CURRENT_TIMESTAMP ORDER BY lease_until LIMIT 50", String.class); // 每批有界，避免长事务。
         for (String id : ids) tx.executeWithoutResult(status -> { // 每个任务使用独立事务。

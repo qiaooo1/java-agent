@@ -26,7 +26,7 @@ class TaskConsumerTest { // 不需要额外部署消息服务。
     @Test void duplicateClaimReleasesCapacityAndAcknowledges() throws Exception { // 其他 Worker 已领取时不能重复调用模型。
         TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); ObjectMapper json = new ObjectMapper(); // 只模拟竞争结果。
         Task task = mock(Task.class); when(task.id()).thenReturn("task"); when(task.userId()).thenReturn("user"); when(task.state()).thenReturn("QUEUED"); // 消息接收时看到的快照可能已经过时。
-        when(tasks.get("task")).thenReturn(task); when(slots.acquire(eq("user"), anyString())).thenReturn(true); when(tasks.claim(eq("task"), anyString())).thenReturn(Optional.empty()); // 模拟另一个 Worker 抢先成功。
+        when(tasks.get("task")).thenReturn(task); when(tasks.readyForExecution("task")).thenReturn(true); when(slots.tryAcquire(eq("user"), anyString())).thenReturn(RedisSlots.Admission.ACQUIRED); when(tasks.claim(eq("task"), anyString())).thenReturn(Optional.empty()); // 模拟另一个 Worker 抢先成功。
         TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json); // 构造真实消费者。
         try { consumer.consume(message(json.writeValueAsBytes(new Dispatch(1, "task", "trace"))), channel); verify(channel).basicAck(7, false); verify(slots).release(eq("user"), anyString()); } finally { consumer.close(); } // 重复消息 ACK 并精确归还自己的容量。
     } // 结束重复消费测试。
@@ -34,7 +34,7 @@ class TaskConsumerTest { // 不需要额外部署消息服务。
         TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); ObjectMapper json = new ObjectMapper(); // 只替换数据库和消息通道。
         Task task = mock(Task.class); when(task.id()).thenReturn("task"); when(task.traceId()).thenReturn("trace"); when(task.userId()).thenReturn("user"); when(task.state()).thenReturn("QUEUED"); // 创建持久化任务快照。
         Claim claim = new Claim(task, 1, "worker"); // 当前执行尝试具备有效凭证。
-        when(tasks.get("task")).thenReturn(task); when(slots.acquire(eq("user"), anyString())).thenReturn(true); when(tasks.claim(eq("task"), anyString())).thenReturn(Optional.of(claim)); // 允许实际进入执行方法。
+        when(tasks.get("task")).thenReturn(task); when(tasks.readyForExecution("task")).thenReturn(true); when(slots.tryAcquire(eq("user"), anyString())).thenReturn(RedisSlots.Admission.ACQUIRED); when(tasks.claim(eq("task"), anyString())).thenReturn(Optional.of(claim)); // 允许实际进入执行方法。
         when(tasks.readSettings(task)).thenReturn(new AgentSettings("test-model", 2048, "safe-v1")); when(tasks.readInput(task)).thenReturn(new Submit("验证运行入口", null, 3)); // 使用数据库中的固定配置。
         when(tasks.heartbeat(claim)).thenReturn(true); when(slots.refresh(eq("user"), anyString())).thenReturn(true); when(tasks.finish(eq(claim), any())).thenReturn(true); // 执行权在本测试内保持有效。
         TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json); ReflectionTestUtils.setField(consumer, "maxRuntime", 30); // 不依赖 Spring 注入，也不调用真实模型。
@@ -57,7 +57,7 @@ class TaskConsumerTest { // 不需要额外部署消息服务。
         }); source.start(); // 准备 Worker 可访问的证据端点。
         TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); Task task = mock(Task.class); // 替换持久化和消息边界。
         when(task.id()).thenReturn("incident"); when(task.userId()).thenReturn("user"); when(task.traceId()).thenReturn("trace"); when(task.state()).thenReturn("QUEUED"); Claim claim = new Claim(task, 1, "worker"); // 固定本次执行凭证。
-        when(tasks.get("incident")).thenReturn(task); when(tasks.claim(eq("incident"), anyString())).thenReturn(Optional.of(claim)); when(slots.acquire(eq("user"), anyString())).thenReturn(true); // 允许正式领取。
+        when(tasks.get("incident")).thenReturn(task); when(tasks.readyForExecution("incident")).thenReturn(true); when(tasks.claim(eq("incident"), anyString())).thenReturn(Optional.of(claim)); when(slots.tryAcquire(eq("user"), anyString())).thenReturn(RedisSlots.Admission.ACQUIRED); // 允许正式领取。
         when(tasks.readSettings(task)).thenReturn(new AgentSettings("test-model", 2048, DiagnosisPolicy.VERSION)); when(tasks.readInput(task)).thenReturn(new Submit("调查任务排队", null, 8, new DiagnosisScope("demo-workbench", "demo-a", "2026-11-05T01:00:00Z", "2026-11-05T01:15:00Z"))); // 使用服务端范围和配置。
         when(tasks.heartbeat(claim)).thenReturn(true); when(slots.refresh(eq("user"), anyString())).thenReturn(true); when(tasks.finish(eq(claim), any())).thenReturn(true); // 执行权始终有效。
         TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json); ReflectionTestUtils.setField(consumer, "maxRuntime", 30); ReflectionTestUtils.setField(consumer, "diagnosisSource", "http://127.0.0.1:" + source.getAddress().getPort()); // 使用规则演示客户端，不连接真实供应商。
@@ -71,4 +71,52 @@ class TaskConsumerTest { // 不需要额外部署消息服务。
             var order = inOrder(tasks, channel); order.verify(tasks).finish(eq(claim), any()); order.verify(channel).basicAck(7, false); verify(slots).release(eq("user"), anyString()); // 原有消息确认和容量释放不被改变。
         } finally { consumer.close(); source.stop(0); } // 清理心跳与本机 HTTP 服务。
     } // 结束 Worker 实际恢复接线场景。
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = RedisSlots.Admission.class, names = {"USER_LIMIT", "PROVIDER_LIMIT"})
+    void capacityDenialPersistsWaitBeforeAckAndDoesNotClaim(RedisSlots.Admission reason) throws Exception {
+        TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); ObjectMapper json = new ObjectMapper();
+        Task task = mock(Task.class); when(task.id()).thenReturn("waiting"); when(task.userId()).thenReturn("user"); when(task.state()).thenReturn("QUEUED");
+        when(tasks.get("waiting")).thenReturn(task); when(tasks.readyForExecution("waiting")).thenReturn(true);
+        when(slots.tryAcquire(eq("user"), anyString())).thenReturn(reason);
+        TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json);
+        try {
+            consumer.consume(message(json.writeValueAsBytes(new Dispatch(1, "waiting", "trace"))), channel);
+            var order = inOrder(tasks, channel); order.verify(tasks).defer("waiting", reason.name()); order.verify(channel).basicAck(7, false);
+            verify(tasks, never()).claim(anyString(), anyString()); verify(slots, never()).release(anyString(), anyString());
+        } finally { consumer.close(); }
+    }
+    @Test void earlyNotificationDoesNotOccupyRedisOrCreateExecutionResources() throws Exception {
+        TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); ObjectMapper json = new ObjectMapper();
+        Task task = mock(Task.class); when(task.state()).thenReturn("RETRY_WAIT"); when(task.id()).thenReturn("early"); when(tasks.get("early")).thenReturn(task);
+        TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json);
+        try {
+            consumer.consume(message(json.writeValueAsBytes(new Dispatch(1, "early", "trace"))), channel);
+            verify(channel).basicAck(7, false); verifyNoInteractions(slots); verify(tasks, never()).claim(anyString(), anyString());
+        } finally { consumer.close(); }
+    }
+    @Test void uncertainAcquireResponseCleansItsTokenAndRequeuesWithoutClaim() throws Exception {
+        TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); ObjectMapper json = new ObjectMapper();
+        Task task = mock(Task.class); when(task.id()).thenReturn("uncertain"); when(task.userId()).thenReturn("user"); when(task.state()).thenReturn("QUEUED");
+        when(tasks.get("uncertain")).thenReturn(task); when(tasks.readyForExecution("uncertain")).thenReturn(true);
+        when(slots.tryAcquire(eq("user"), anyString())).thenThrow(new IllegalStateException("simulated lost response"));
+        TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json);
+        try {
+            consumer.consume(message(json.writeValueAsBytes(new Dispatch(1, "uncertain", "trace"))), channel);
+            ArgumentCaptor<String> token = ArgumentCaptor.forClass(String.class); verify(slots).tryAcquire(eq("user"), token.capture()); verify(slots).release("user", token.getValue());
+            verify(channel).basicNack(7, false, true); verify(channel, never()).basicAck(anyLong(), anyBoolean()); verify(tasks, never()).claim(anyString(), anyString());
+        } finally { consumer.close(); }
+    }
+    @Test void failedDurableDeferralMustNotAcknowledgeNotification() throws Exception {
+        TaskStore tasks = mock(TaskStore.class); RedisSlots slots = mock(RedisSlots.class); Channel channel = mock(Channel.class); ObjectMapper json = new ObjectMapper();
+        Task task = mock(Task.class); when(task.id()).thenReturn("failed-wait"); when(task.userId()).thenReturn("user"); when(task.state()).thenReturn("QUEUED");
+        when(tasks.get("failed-wait")).thenReturn(task); when(tasks.readyForExecution("failed-wait")).thenReturn(true);
+        when(slots.tryAcquire(eq("user"), anyString())).thenReturn(RedisSlots.Admission.USER_LIMIT);
+        when(tasks.defer("failed-wait", "USER_LIMIT")).thenThrow(new IllegalStateException("simulated commit failure"));
+        TaskConsumer consumer = new TaskConsumer(tasks, slots, mock(KnowledgeStore.class), json);
+        try {
+            consumer.consume(message(json.writeValueAsBytes(new Dispatch(1, "failed-wait", "trace"))), channel);
+            verify(channel).basicNack(7, false, true); verify(channel, never()).basicAck(anyLong(), anyBoolean()); verify(tasks, never()).claim(anyString(), anyString());
+        } finally { consumer.close(); }
+    }
+
 } // 结束 Worker 边界测试。

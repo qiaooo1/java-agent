@@ -50,12 +50,18 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
         Dispatch dispatch; // 先把协议错误与暂时性基础设施错误分开。
         try { dispatch = json.readValue(message.getBody(), Dispatch.class); if (dispatch.version() != 1 || dispatch.taskId() == null) throw new IllegalArgumentException("消息版本或标识无效"); } catch (Exception e) { channel.basicReject(tag, false); return; } // 非法消息进入死信，不能无限重投。
         String token = UUID.randomUUID().toString(); // Redis 槽位按本次消费唯一标识释放。
-        Task task = null; boolean acquired = false; // 清理时只释放自己取得的容量。
+        Task task = null; boolean releaseSlot = false; // 清理时只释放自己取得的容量。
         try { // 基础设施失败时保留任务，由租约或消息重投恢复。
             task = tasks.get(dispatch.taskId()); // 消息只提供通知，业务事实以数据库为准。
             if (Contracts.terminal(task.state()) || task.state().equals("RUNNING") || task.state().equals("CANCEL_REQUESTED")) { channel.basicAck(tag, false); return; } // 重复投递不能重新执行在途或终态任务。
-            acquired = slots.acquire(task.userId(), token); // 在触发模型请求前取得共享用户和供应商容量。
-            if (!acquired) { tasks.defer(task.id()); channel.basicAck(tag, false); return; } // 容量不足通过 Outbox 延迟，不立即 requeue 忙循环。
+            if (!tasks.readyForExecution(task.id())) { channel.basicAck(tag, false); return; } // 提前到达的旧通知不占用 Redis 容量。
+            releaseSlot = true; // 网络响应丢失时也尝试清理本次唯一 token，TTL 仍兜底。
+            RedisSlots.Admission admission = slots.tryAcquire(task.userId(), token);
+            if (admission != RedisSlots.Admission.ACQUIRED) {
+                releaseSlot = false; // 已明确未占位，不额外访问 Redis 释放。
+                tasks.defer(task.id(), admission.name()); // 延迟、审计事件和 Outbox 在同一事务中提交。
+                channel.basicAck(tag, false); return;
+            }
             Optional<Claim> claim = tasks.claim(task.id(), worker); // 多 Worker 条件领取只允许一个执行者成功。
             if (claim.isPresent()) execute(claim.get(), token); // 领取成功才创建模型客户端和工具池。
             Thread.interrupted(); // AMQP 确认前清除本次协作取消产生的线程中断，避免污染监听容器下一条消息。
@@ -67,7 +73,7 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
             try { Thread.sleep(1000); } catch (InterruptedException interrupted) { Thread.interrupted(); } // 暂时性基础设施故障使用有界退避，避免立即热重投。
             channel.basicNack(tag, false, true); // 任务可能尚未领取，必须保留投递；只有协议错误进入死信。
         } finally { // 模型异常也不能永久占用共享容量。
-            if (acquired && task != null) try { slots.release(task.userId(), token); } catch (Exception e) { log.warn("slot_release_failed taskId={}", task.id()); } // Redis TTL 兜底清理失败释放。
+            if (releaseSlot && task != null) try { slots.release(task.userId(), token); } catch (Exception e) { log.warn("slot_release_failed taskId={}", task.id()); } // Redis TTL 兜底清理失败释放。
         } // 完成消费清理。
     } // 结束消息消费。
     private void execute(Claim claim, String token) { // 每次尝试独享客户端、工具注册表和取消信号。
@@ -83,30 +89,31 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
         DiagnosisWorkflow investigation = diagnosis ? new DiagnosisWorkflow(input.diagnosis(), diagnosisSource, claim.attemptNo(), demo ? "DEMO_SCRIPT" : "REAL_MODEL", Duration.ofSeconds(maxRuntime)) : null; // 每次尝试隔离业务范围与证据，通用治理交给 Harness。
         LLMClient llm = demo ? diagnosis ? new DiagnosisDemoClient() : new MockLLMClient(List.of(new ChatResponse("演示任务已完成：" + input.goal(), List.of(), new ChatResponse.Usage(0, 0)))) : new OpenAiCompatClient(baseUrl, apiKey, settings.model()); // 无密钥时保留明确的演示模式。
         ToolRegistry tools = new ToolRegistry(10000); // 工单不注册通用工具，更不开放任意 URL 与 Shell。
-        if (diagnosis) tools.register(investigation.tools()); else tools.register(new BasicTools()); // 业务适配器决定工具能力，Harness 再按策略授权。
-        if (!diagnosis && input.knowledgeId() != null && !input.knowledgeId().isBlank()) tools.register(new TaskKnowledgeTool(knowledge, claim.task().userId(), input.knowledgeId())); // 通用任务保留已有知识功能。
-        ScheduledFuture<?> pulse = heartbeats.scheduleAtFixedRate(() -> { // 独立线程周期检查执行权和取消请求。
-            try { // 任一控制设施失效都保守停止新增付费工作。
-                if (Instant.now().isAfter(deadline) || !tasks.heartbeat(claim) || !slots.refresh(claim.task().userId(), token)) stop.set(true); // 数据库租约与 Redis 容量必须同时有效。
-            } catch (Exception e) { stop.set(true); log.warn("heartbeat_failed taskId={} attemptNo={}", claim.task().id(), claim.attemptNo(), e); } // 无法证明执行权时停止，而不是无限继续。
-            synchronized (lifecycle) { if (stop.get() && !finished.get()) { llm.cancel(); executing.interrupt(); } } // 执行退出与取消互斥，防止迟到心跳中断下一次消费。
-        }, 5, 5, TimeUnit.SECONDS); // 每五秒续约，小于三十秒租约。
-        StringBuilder pending = new StringBuilder(); // 合并文本增量，避免每个 token 都单独提交数据库事务。
-        ExecutionProgress progress = new ExecutionProgress(claim.attemptNo(), step -> tasks.append(claim, "step", Json.write(step)), Clock.systemUTC()); // 步骤状态通过原有凭证校验后持久化。
-        AgentListener listener = new AgentListener() { // 事件写入始终携带 fencing 凭证。
-            private void flush() { if (!pending.isEmpty()) { tasks.append(claim, "delta", pending.toString()); pending.setLength(0); } } // 重要事件前先持久化累计文本。
-            @Override public void onIterationStart(int step) { if (!tasks.heartbeat(claim) || !slots.refresh(claim.task().userId(), token)) { stop.set(true); throw new IllegalStateException("执行权失效或任务已取消"); } tasks.append(claim, "iteration", Integer.toString(step)); progress.modelStarted(step); } // 每次模型调用前再次验证权限并创建实际步骤。
-            @Override public void onModelResponse(int step) { progress.modelCompleted(step); } // 模型响应到达后立即结束对应分析步骤。
-            @Override public void onValidationStart() { progress.validationStarted(); } // 在结果验收前向用户展示真实阶段。
-            @Override public void onAssistantDelta(String delta) { if (stop.get()) throw new IllegalStateException("任务已停止"); if (!diagnosis) { pending.append(delta); if (pending.length() >= 256) flush(); } } // 工单最终报告验收前不作为正式结果展示。
-            @Override public void onActionStart(ToolCall call) { flush(); tasks.append(claim, "action", call.name() + " " + call.argumentsJson()); progress.toolStarted(call.name() != null && tools.names().contains(call.name()) ? call.name() : "未知工具"); } // 步骤标题不携带工具参数。
-            @Override public void onObservation(ToolCall call, String observation) { tasks.append(claim, "observation", observation); } // 结果作为可回放事件持久化。
-            @Override public void onToolAttempt(ToolCall call, int attempt, ToolResult result) { tasks.append(claim, "tool_attempt", Json.write(Map.of("tool", call.name() != null && tools.names().contains(call.name()) ? call.name() : "<unknown>", "callId", call.id() == null ? "" : call.id(), "attempt", attempt, "status", result.successful() ? "SUCCEEDED" : "FAILED", "errorCode", result.successful() ? "NONE" : result.error().name()))); progress.toolAttempt(attempt, result); } // 调用标识关联多次尝试，不记录原始参数和底层异常消息。
-            @Override public void onToolRetry(ToolCall call, int nextAttempt, ToolErrorCode reason, long delayMillis) { tasks.append(claim, "tool_retry", Json.write(Map.of("tool", call.name(), "callId", call.id() == null ? "" : call.id(), "nextAttempt", nextAttempt, "reason", reason.name(), "delayMillis", delayMillis))); progress.retry(nextAttempt, reason, delayMillis); } // 同一步骤展示真实重试安排。
-            @Override public void onFinalAnswer(String answer) { flush(); if (!diagnosis) tasks.append(claim, "answer", answer); } // 工单报告需要额外经过引用与结构验收。
-            @Override public void onError(String message) { log.info("agent_stopped taskId={} attemptNo={} reason={}", claim.task().id(), claim.attemptNo(), message); } // 停止后不再强行写入失效事件流。
-        }; // 完成监听器装配。
-        try { // 执行和结算异常由外层消费处理，租约恢复兜底。
+        ScheduledFuture<?> pulse = null;
+        try { // 初始化失败也必须释放已创建的客户端和工具资源。
+            if (diagnosis) tools.register(investigation.tools()); else tools.register(new BasicTools()); // 业务适配器决定工具能力，Harness 再按策略授权。
+            if (!diagnosis && input.knowledgeId() != null && !input.knowledgeId().isBlank()) tools.register(new TaskKnowledgeTool(knowledge, claim.task().userId(), input.knowledgeId())); // 通用任务保留已有知识功能。
+            pulse = heartbeats.scheduleAtFixedRate(() -> { // 独立线程周期检查执行权和取消请求。
+                try { // 任一控制设施失效都保守停止新增付费工作。
+                    if (Instant.now().isAfter(deadline) || !tasks.heartbeat(claim) || !slots.refresh(claim.task().userId(), token)) stop.set(true); // 数据库租约与 Redis 容量必须同时有效。
+                } catch (Exception e) { stop.set(true); log.warn("heartbeat_failed taskId={} attemptNo={}", claim.task().id(), claim.attemptNo(), e); } // 无法证明执行权时停止，而不是无限继续。
+                synchronized (lifecycle) { if (stop.get() && !finished.get()) { llm.cancel(); executing.interrupt(); } } // 执行退出与取消互斥，防止迟到心跳中断下一次消费。
+            }, 5, 5, TimeUnit.SECONDS); // 每五秒续约，小于三十秒租约。
+            StringBuilder pending = new StringBuilder(); // 合并文本增量，避免每个 token 都单独提交数据库事务。
+            ExecutionProgress progress = new ExecutionProgress(claim.attemptNo(), step -> tasks.append(claim, "step", Json.write(step)), Clock.systemUTC()); // 步骤状态通过原有凭证校验后持久化。
+            AgentListener listener = new AgentListener() { // 事件写入始终携带 fencing 凭证。
+                private void flush() { if (!pending.isEmpty()) { tasks.append(claim, "delta", pending.toString()); pending.setLength(0); } } // 重要事件前先持久化累计文本。
+                @Override public void onIterationStart(int step) { if (!tasks.heartbeat(claim) || !slots.refresh(claim.task().userId(), token)) { stop.set(true); throw new IllegalStateException("执行权失效或任务已取消"); } tasks.append(claim, "iteration", Integer.toString(step)); progress.modelStarted(step); } // 每次模型调用前再次验证权限并创建实际步骤。
+                @Override public void onModelResponse(int step) { progress.modelCompleted(step); } // 模型响应到达后立即结束对应分析步骤。
+                @Override public void onValidationStart() { progress.validationStarted(); } // 在结果验收前向用户展示真实阶段。
+                @Override public void onAssistantDelta(String delta) { if (stop.get()) throw new IllegalStateException("任务已停止"); if (!diagnosis) { pending.append(delta); if (pending.length() >= 256) flush(); } } // 工单最终报告验收前不作为正式结果展示。
+                @Override public void onActionStart(ToolCall call) { flush(); tasks.append(claim, "action", call.name() + " " + call.argumentsJson()); progress.toolStarted(call.name() != null && tools.names().contains(call.name()) ? call.name() : "未知工具"); } // 步骤标题不携带工具参数。
+                @Override public void onObservation(ToolCall call, String observation) { tasks.append(claim, "observation", observation); } // 结果作为可回放事件持久化。
+                @Override public void onToolAttempt(ToolCall call, int attempt, ToolResult result) { tasks.append(claim, "tool_attempt", Json.write(Map.of("tool", call.name() != null && tools.names().contains(call.name()) ? call.name() : "<unknown>", "callId", call.id() == null ? "" : call.id(), "attempt", attempt, "status", result.successful() ? "SUCCEEDED" : "FAILED", "errorCode", result.successful() ? "NONE" : result.error().name()))); progress.toolAttempt(attempt, result); } // 调用标识关联多次尝试，不记录原始参数和底层异常消息。
+                @Override public void onToolRetry(ToolCall call, int nextAttempt, ToolErrorCode reason, long delayMillis) { tasks.append(claim, "tool_retry", Json.write(Map.of("tool", call.name(), "callId", call.id() == null ? "" : call.id(), "nextAttempt", nextAttempt, "reason", reason.name(), "delayMillis", delayMillis))); progress.retry(nextAttempt, reason, delayMillis); } // 同一步骤展示真实重试安排。
+                @Override public void onFinalAnswer(String answer) { flush(); if (!diagnosis) tasks.append(claim, "answer", answer); } // 工单报告需要额外经过引用与结构验收。
+                @Override public void onError(String message) { log.info("agent_stopped taskId={} attemptNo={} reason={}", claim.task().id(), claim.attemptNo(), message); } // 停止后不再强行写入失效事件流。
+            }; // 完成监听器装配。
             AgentConfig config = AgentConfig.builder().model(settings.model()).maxTokens(settings.maxTokens()).maxIterations(input.maxSteps()).build(); // 沿用任务快照的模型与步数上限。
             HarnessWorkflow workflow = diagnosis ? investigation : new SafeTaskWorkflow(tools.names(), Math.multiplyExact(input.maxSteps(), 4), Duration.ofSeconds(maxRuntime)); // 两类业务通过同一扩展点运行，通用调用预算为步数上限乘四。
             HarnessContext context = new HarnessContext(claim.task().id(), claim.task().traceId(), claim.attemptNo()); // 绑定本次持久化执行身份。
@@ -123,7 +130,7 @@ public class TaskConsumer { // 至少一次投递通过数据库领取与结算�
             log.info("attempt_finished taskId={} traceId={} attemptNo={} committed={}", claim.task().id(), claim.task().traceId(), claim.attemptNo(), committed); // false 表示旧尝试无权覆盖当前任务。
         } finally { // 清理不依赖执行是否正常完成。
             synchronized (lifecycle) { finished.set(true); } // 退出后即使旧心跳恢复，也不允许再触碰消费线程。
-            pulse.cancel(false); // 停止续租，未完成事务由租约扫描处理。
+            if (pulse != null) pulse.cancel(false); // 停止续租，未完成事务由租约扫描处理。
             llm.cancel(); tools.closeWorkers(); // 关闭网络连接与工具线程池。
         } // 完成执行资源清理。
     } // 结束单次尝试。

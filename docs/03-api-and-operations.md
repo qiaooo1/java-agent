@@ -61,6 +61,8 @@
 
 ## SSE 契约
 
+`capacity_wait` 表示执行容量不足时的可靠等待，`data` 为 JSON 字符串，包含 `reason`（`USER_LIMIT` 或 `PROVIDER_LIMIT`）、`delayMillis`、UTC `availableAt`、`deferrals`。任务进入 `RETRY_WAIT`，实际执行的 `attemptNo` 不增加；同一等待窗口内不重复创建 Outbox。页面可通过 SSE 更新等待状态，原始事件保留具体原因与时间。它与 Worker 失联后的 `retry` 事件含义不同，详见[并发调度说明](09-scheduling-and-capacity.md)。
+
 `step` 类型的 `Event.data` 是 JSON 字符串，包含完整 `ExecutionStep`：`id`、`attemptNo`、`position`、`kind`、`title`、`status`、`iteration`、`tool`、`toolAttempt`、`errorCode`、`detail`、`startedAtMillis`、`updatedAtMillis`、`elapsedMillis`。步骤 ID 为 `a{attemptNo}-step-{position}`；同一次工具调用的自动重试沿用该 ID，前端替换原行。时间使用 Unix 毫秒；运行中耗时根据服务器观测时间继续累计，结束后冻结。`toolAttempt` 是已收到实际结果的尝试次数，下一次待重试的序号写在 `detail` 中。
 
 `GET /api/tasks/{id}/progress` 返回 `taskId`、任务 `state`、`attemptNo`、`lastSeq`、`observedAtMillis`、`attemptStartedAtMillis`、`attemptFinishedAtMillis`、`truncated`、`incomplete` 和 `steps`。未认证返回 401，其他用户的任务与不存在的任务均返回 404。查询最多投影最近 500 条步骤更新，超出时 `truncated=true`；无效步骤记录被跳过并设置 `incomplete=true`，不返回其原始内容。

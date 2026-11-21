@@ -45,6 +45,8 @@ Windows 自动选择已安装的 Edge 或 Chrome，也可通过 `PROGRESS_BROWSE
 
 ## 必须覆盖的故障
 
+调度回归包含并发容量等待去重、状态/事件/Outbox 原子回滚、在途上限、等待落库后的 ACK 顺序与不确定申请的清理。`RedisSlotsIT` 在真实 Redis 上运行 Lua 并发与归属测试；独立启动方式见[调度与资源控制指南](09-scheduling-and-capacity.md#验证与边界)，它不替代整套 MySQL/RabbitMQ 多进程集成。
+
 数据安全回归见 `DataIsolationApiTest`、`KnowledgeIsolationTest`、`TaskKnowledgeToolTest` 和 `GatewayJwtTest`：覆盖真实两用户身份、跨用户读写拒绝及无副作用、公开响应字段、文档检索范围、工具权限拒绝、JWT 必需字段与安全响应头。这些 Java 测试已纳入默认 `verify`，不需要真实模型。
 
 1. 相同幂等键同时提交，只生成一个任务、一次预留、一个初始 Outbox。

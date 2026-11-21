@@ -150,4 +150,65 @@ class TaskStoreTest { // H2 验证事务逻辑，真实 MySQL 由独立集成测
         outbox.sent(current); // 新发布器确认成功。
         assertEquals("SENT", db.queryForObject("SELECT state FROM outbox_event WHERE id=?", String.class, id)); // 正确持有者才能完成发布。
     } // 结束发布租约测试。
+    @Test void concurrentCapacityDenialsCreateOneDurableReschedule() throws Exception {
+        Task task = submit("capacity"); db.update("UPDATE task SET capacity_deferrals=30 WHERE id=?", task.id()); var pool = Executors.newFixedThreadPool(16); var barrier = new CyclicBarrier(16);
+        try {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (int i = 0; i < 16; i++) results.add(pool.submit(() -> { barrier.await(5, TimeUnit.SECONDS); return tasks.defer(task.id(), "PROVIDER_LIMIT"); }));
+            int changed = 0; for (var result : results) if (result.get(10, TimeUnit.SECONDS)) changed++;
+            assertEquals(1, changed); assertEquals(2, count("outbox_event"));
+            assertEquals("RETRY_WAIT", tasks.get(task.id()).state()); assertEquals(0, tasks.get(task.id()).attemptNo());
+            assertEquals(0, count("task_attempt")); assertEquals(1, tasks.account("u").reservedTasks());
+            assertEquals(1, tasks.events("u", task.id(), 0).stream().filter(event -> event.type().equals("capacity_wait")).count());
+            assertFalse(tasks.readyForExecution(task.id())); assertTrue(tasks.claim(task.id(), "early-worker").isEmpty());
+        } finally { pool.shutdownNow(); }
+    }
+    @Test void capacityBackoffIsPersistedAndResetOnlyAfterActualClaim() throws Exception {
+        Task task = submit("capacity-sequence"); var json = new ObjectMapper();
+        for (int count = 0; count < 7; count++) {
+            db.update("UPDATE task SET available_at=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP) WHERE id=?", task.id());
+            assertTrue(tasks.readyForExecution(task.id())); assertTrue(tasks.defer(task.id(), "USER_LIMIT"));
+            var event = tasks.events("u", task.id(), 0).get(count + 1); var data = json.readTree(event.data());
+            long ceiling = Math.min(30000L, 2000L << Math.min(count, 4));
+            assertEquals("USER_LIMIT", data.path("reason").asText());
+            assertTrue(data.path("delayMillis").asLong() >= ceiling / 2 && data.path("delayMillis").asLong() <= ceiling);
+            assertEquals(count + 1, data.path("deferrals").asInt());
+            assertEquals(db.queryForObject("SELECT available_at FROM task WHERE id=?", java.sql.Timestamp.class, task.id()).toInstant(), java.time.Instant.parse(data.path("availableAt").asText()));
+            assertEquals(0, tasks.get(task.id()).attemptNo());
+        }
+        db.update("UPDATE task SET available_at=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP) WHERE id=?", task.id());
+        assertTrue(tasks.claim(task.id(), "worker").isPresent());
+        assertEquals(0, db.queryForObject("SELECT capacity_deferrals FROM task WHERE id=?", Integer.class, task.id()));
+        assertFalse(tasks.defer(task.id(), "USER_LIMIT")); assertFalse(tasks.readyForExecution(task.id()));
+    }
+    @Test void failedOutboxInsertRollsBackWaitStateAndEvent() {
+        Task task = submit("failed-defer"); db.execute("DROP TABLE outbox_event");
+        assertThrows(org.springframework.dao.DataAccessException.class, () -> tasks.defer(task.id(), "PROVIDER_LIMIT"));
+        assertEquals("QUEUED", tasks.get(task.id()).state()); assertEquals(1, tasks.get(task.id()).nextSeq());
+        assertEquals(1, count("task_event")); assertEquals(0, db.queryForObject("SELECT capacity_deferrals FROM task WHERE id=?", Integer.class, task.id()));
+        assertEquals(1, tasks.account("u").reservedTasks());
+    }
+    @Test void cancelledCapacityWaitCannotBeRescheduledOrCharged() {
+        Task task = submit("cancel-wait"); tasks.defer(task.id(), "USER_LIMIT"); tasks.cancel("u", task.id());
+        int events = count("task_event"), notifications = count("outbox_event");
+        assertFalse(tasks.defer(task.id(), "PROVIDER_LIMIT")); assertFalse(tasks.readyForExecution(task.id()));
+        assertEquals(events, count("task_event")); assertEquals(notifications, count("outbox_event"));
+        assertEquals(0, tasks.account("u").reservedTasks()); assertEquals(0, tasks.account("u").usedTasks());
+    }
+    @Test void concurrentDistinctSubmissionsCannotExceedInflightLimit() throws Exception {
+        TaskStore limited = new TaskStore(db, new DataSourceTransactionManager(db.getDataSource()), new ObjectMapper(), 100, 2, 30);
+        var pool = Executors.newFixedThreadPool(8); var barrier = new CyclicBarrier(8);
+        try {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (int i = 0; i < 8; i++) { final int key = i; results.add(pool.submit(() -> {
+                barrier.await(5, TimeUnit.SECONDS);
+                try { limited.submit("u", "distinct-" + key, new Submit("计算", null, 3)); return true; }
+                catch (BusinessException rejected) { assertEquals(429, rejected.status); return false; }
+            })); }
+            int accepted = 0; for (var result : results) if (result.get(10, TimeUnit.SECONDS)) accepted++;
+            assertEquals(2, accepted); assertEquals(2, count("task")); assertEquals(2, count("outbox_event"));
+            assertEquals(2, limited.account("u").reservedTasks()); assertEquals(0, count("usage_ledger"));
+        } finally { pool.shutdownNow(); }
+    }
+
 } // 结束任务事务测试。

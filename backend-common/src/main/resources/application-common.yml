@@ -23,15 +23,15 @@ spring: # 两个后端服务共享数据库与中间件配置。
       simple: # 固定并发，避免失控调用上游模型。
         acknowledge-mode: manual # 状态持久化后再确认消息。
         prefetch: 1 # 每个消费者仅预取一个长任务，减少任务占坑。
-        concurrency: 2 # 每个实例同时执行两个任务。
-        max-concurrency: 2 # 扩容需要显式修改配置并压测。
+        concurrency: ${WORKER_CONSUMERS:2} # 实例消费者数，与用户共享并发上限分开配置。
+        max-concurrency: ${WORKER_CONSUMERS:2} # 固定上限，不自动扩张消费者。
         default-requeue-rejected: false # 永久错误不能无限热循环。
 agent: # 模型名由平台快照，Worker 按快照执行。
   model: ${LLM_MODEL:deepseek-chat} # 两端首次部署配置保持一致。
 workbench: # 项目自己的业务限制。
   monthly-tasks: ${MONTHLY_TASKS:100} # 按成功任务次数计量，token 单独记录。
   max-inflight: ${MAX_INFLIGHT:10} # 每个用户最多占用的排队及执行任务数。
-  worker-concurrency: ${USER_CONCURRENCY:2} # 一个用户在所有 Worker 上的共享执行上限。
+  user-concurrency: ${USER_CONCURRENCY:${workbench.worker-concurrency:2}} # 一个用户在所有 Worker 上的共享执行上限。
   provider-concurrency: ${PROVIDER_CONCURRENCY:8} # 所有实例共同遵守的模型并发上限。
   lease-seconds: 30 # 数据库执行租约，Worker 每五秒续约。
   max-runtime-seconds: ${MAX_RUNTIME_SECONDS:180} # 单次尝试总时限，避免永久续租。

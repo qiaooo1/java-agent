@@ -70,7 +70,7 @@ flowchart LR
 | 创建任务成功，但发送 MQ 失败 | 任务、额度预留、初始事件和 Outbox 同事务落库；事务外发布并检查 RabbitMQ 确认与退回 | [TaskStore](backend-common/src/main/java/com/agent4/backend/TaskStore.java)、[DispatchPublisher](backend-common/src/main/java/com/agent4/backend/DispatchPublisher.java) |
 | 用户重复提交或消息重复投递 | 用户与幂等键唯一约束、输入一致性检查、数据库条件领取，以及唯一结算账本 | [任务表与约束](backend-common/src/main/resources/db/migration/V1__platform.sql)、[TaskConsumer](worker-service/src/main/java/com/agent4/worker/TaskConsumer.java) |
 | Worker 失联后恢复，旧执行者迟到写回 | 数据库租约、心跳和递增 `attemptNo` 共同校验执行权，拒绝过期执行者修改结果；失联任务有限重试 | [TaskStore](backend-common/src/main/java/com/agent4/backend/TaskStore.java) |
-| 多 Worker 同时占用用户和模型容量 | Redis Lua 与有序集合原子管理共享槽位，配合续约、过期回收和任务退避 | [RedisSlots](backend-common/src/main/java/com/agent4/backend/RedisSlots.java) |
+| 多 Worker 同时争抢容量、等待任务集中重试 | Redis Lua 管理用户/全局槽位，按用户与 token 释放；容量等待采用有界抖动退避，状态、事件和 Outbox 同事务提交 | [RedisSlots](backend-common/src/main/java/com/agent4/backend/RedisSlots.java)、[调度说明](docs/09-scheduling-and-capacity.md) |
 | 断线后丢失任务进度，或跨用户读取结果 | 事件持久化并按 `Last-Event-ID` 补读；网关与平台独立校验 JWT，资源查询校验所有者 | [TaskStreamController](platform-service/src/main/java/com/agent4/platform/api/TaskStreamController.java)、[平台 API](platform-service/src/main/java/com/agent4/platform/api) |
 | Agent 扩大调查范围或编造证据引用 | 固定资源目录、只读工具、参数与预算校验；生成报告后校验结构及本次执行的证据引用 | [DiagnosisPolicy](common-contract/src/main/java/com/agent4/contract/DiagnosisPolicy.java)、[DiagnosisWorkflow](worker-service/src/main/java/com/agent4/worker/diagnosis/DiagnosisWorkflow.java) |
 
@@ -153,7 +153,7 @@ docker compose up -d --scale worker=2
 | 进度浏览器验证 | `node scripts/progress-ui-smoke.mjs` | 本地固定 API/SSE 下的实际页面交互，环境准备见测试指南 |
 | 真实模型评估 | `node scripts/evaluate.mjs` | 固定任务集评估；需配置真实模型，拒绝对演示响应评分 |
 
-**最近一次本地默认回归（2026-11-21）**：全模块构建成功，20 个测试套件、125 个测试通过，失败、错误、跳过均为 0；新增 16 项 Java 安全与隔离回归，覆盖两用户越权拒绝及无副作用、知识文档范围、工具权限错误、JWT 必需字段、任务响应白名单和安全响应头，同时保留原有事务、执行恢复、进度和网关回归。另有 7 项前端进度状态测试通过，`app.js` 与 `progress.js` 语法检查通过。本次未运行 Docker 集成、浏览器交互或真实模型评估，详见[维护日志](docs/maintenance-log.md)。
+**最近一次本地默认回归（2026-11-21）**：全模块构建成功，21 个测试套件、137 项默认测试通过，失败、错误、跳过均为 0；新增容量退避、并发等待去重、Outbox 回滚、在途上限、Worker 清理及消息确认回归。另在独立本机 Redis 5.0.14.1 上通过 5 项真实 Lua 测试，覆盖 64 路竞争全局容量、单用户上限、释放归属、过期回收和失效续约；8 项前端进度状态测试通过，Compose 参数传递验证通过。本次未运行完整 Docker/MySQL/RabbitMQ 集成、浏览器交互或真实模型评估，未测量 QPS，详见[维护日志](docs/maintenance-log.md)。
 
 [GitHub Actions 工作流](.github/workflows/ci.yml) 已配置推送、PR 和手动触发，自动执行 Java 构建、默认回归和 JavaScript 语法检查。每次云端结果以 Actions 中对应的运行记录为准，测试报告保留七天。
 
@@ -167,6 +167,7 @@ docker compose up -d --scale worker=2
 - [故障诊断指南](docs/06-diagnosis-workflow.md)：工具授权、调查预算、报告验收与业务 API。
 - [Harness 设计与接入指南](docs/07-harness.md)：运行契约、治理边界和业务扩展方式。
 - [数据安全与用户隔离](docs/08-data-isolation.md)：身份校验、数据访问范围、响应字段白名单及安全验证边界。
+- [并发调度与资源控制](docs/09-scheduling-and-capacity.md)：准入上限、可靠容量退避、槽位归属和并发测试。
 - [测试与评估](docs/04-testing-and-benchmarks.md) · [历史验证记录](docs/05-verification.md) · [维护日志](docs/maintenance-log.md)。
 
 ## 当前范围与后续方向

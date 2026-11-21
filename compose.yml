@@ -51,6 +51,9 @@ services: # 三个中间件与三个业务进程。
       DB_URL: jdbc:mysql://mysql:3306/workbench?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&characterEncoding=UTF-8 # 统一数据库会话时区。
       DB_PASSWORD: ${DB_PASSWORD:-workbench-local} # 与 MySQL 业务账户一致。
       REDIS_HOST: redis # 内部连接不走宿主机端口。
+      USER_CONCURRENCY: ${USER_CONCURRENCY:-2}
+      PROVIDER_CONCURRENCY: ${PROVIDER_CONCURRENCY:-8}
+      MAX_INFLIGHT: ${MAX_INFLIGHT:-10}
       RABBIT_HOST: rabbitmq # RabbitMQ 服务名。
       RABBIT_PASSWORD: ${RABBIT_PASSWORD:-workbench-local} # 与 broker 用户一致。
       JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me-32-bytes} # 与网关共享验签密钥。
@@ -77,6 +80,9 @@ services: # 三个中间件与三个业务进程。
       DB_URL: jdbc:mysql://mysql:3306/workbench?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&characterEncoding=UTF-8 # UTC JDBC 会话。
       DB_PASSWORD: ${DB_PASSWORD:-workbench-local} # 业务数据库密码。
       REDIS_HOST: redis # 共享执行容量。
+      WORKER_CONSUMERS: ${WORKER_CONSUMERS:-2}
+      USER_CONCURRENCY: ${USER_CONCURRENCY:-2}
+      PROVIDER_CONCURRENCY: ${PROVIDER_CONCURRENCY:-8}
       RABBIT_HOST: rabbitmq # 消费任务队列。
       RABBIT_PASSWORD: ${RABBIT_PASSWORD:-workbench-local} # 消息账号密码。
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-} # 空值进入演示模式，不在仓库保存真实密钥。

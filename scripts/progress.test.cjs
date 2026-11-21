@@ -58,3 +58,12 @@ test('旧任务无结构化记录时保持空列表，截断标记如实保留',
   progress.load(state, snapshot({ state: 'SUCCEEDED', steps: [], truncated: true, incomplete: true, attemptFinishedAtMillis: 2500 }), 3000);
   assert.equal(progress.view(state).steps.length, 0); assert.equal(state.truncated, true); assert.equal(state.incomplete, true);
 });
+
+test('容量等待不创建执行步骤，也不延长已结束尝试的执行耗时', () => {
+  const state = progress.create('task'); progress.load(state, snapshot(), 2000);
+  progress.apply(state, event(3, 'retry', 'lease expired'));
+  const ended = progress.view(state, 3000).elapsedMillis;
+  progress.apply(state, event(4, 'capacity_wait', { reason: 'USER_LIMIT', delayMillis: 1500 }, { createdAt: new Date(5000).toISOString() }));
+  assert.equal(state.state, 'RETRY_WAIT'); assert.equal(state.attemptNo, 1);
+  assert.equal(state.steps.size, 1); assert.equal(progress.view(state, 9000).elapsedMillis, ended);
+});

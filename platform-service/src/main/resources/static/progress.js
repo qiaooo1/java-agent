@@ -25,7 +25,7 @@
     state.lastSeq = event.seq; const time = Date.parse(event.createdAt) || state.updated; const attempt = Number.isInteger(event.attemptNo) ? event.attemptNo : state.attemptNo; // 时间来自后端持久化事件。
     if (event.type === "running") { state.state = "RUNNING"; state.attemptNo = attempt; state.started = time; state.finished = 0; closeOpen(state, time); } // 新尝试不会和旧步骤共用执行状态。
     if (event.type === "queued") state.state = "QUEUED"; // 排队没有伪造运行步骤。
-    if (event.type === "retry") { state.state = "RETRY_WAIT"; state.finished = time; closeOpen(state, time); } // 租约恢复与工具内部重试是不同层次。
+    if (event.type === "retry" || event.type === "capacity_wait") { state.state = "RETRY_WAIT"; state.finished = state.finished || time; closeOpen(state, state.finished); } // 租约恢复与工具内部重试是不同层次。
     if (event.type === "cancel_requested") state.state = "CANCEL_REQUESTED"; // 等待执行端确认。
     if (event.type === "done" && terminal(event.data)) { state.state = event.data; state.finished = time; closeOpen(state, time); } // 终态立即展示，无需等 SSE 关闭。
     if (event.type === "step") { // 步骤事件携带完整状态，因此可以直接回放恢复。
