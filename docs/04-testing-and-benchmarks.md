@@ -45,6 +45,8 @@ Windows 自动选择已安装的 Edge 或 Chrome，也可通过 `PROGRESS_BROWSE
 
 ## 必须覆盖的故障
 
+工作记忆回归覆盖四消息窗口中的早期观察裁剪与召回、工具源不重复执行、召回的预算/取消限制、状态序列化与容量、实例/尝试隔离，以及持久化幂等、拒绝回退、失权拒绝、事务回滚和所有者接口。相关测试及范围见[工作记忆指南](10-working-memory-and-state.md#验证)。
+
 调度回归包含并发容量等待去重、状态/事件/Outbox 原子回滚、在途上限、等待落库后的 ACK 顺序与不确定申请的清理。`RedisSlotsIT` 在真实 Redis 上运行 Lua 并发与归属测试；独立启动方式见[调度与资源控制指南](09-scheduling-and-capacity.md#验证与边界)，它不替代整套 MySQL/RabbitMQ 多进程集成。
 
 数据安全回归见 `DataIsolationApiTest`、`KnowledgeIsolationTest`、`TaskKnowledgeToolTest` 和 `GatewayJwtTest`：覆盖真实两用户身份、跨用户读写拒绝及无副作用、公开响应字段、文档检索范围、工具权限拒绝、JWT 必需字段与安全响应头。这些 Java 测试已纳入默认 `verify`，不需要真实模型。

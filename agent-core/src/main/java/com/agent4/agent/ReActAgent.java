@@ -53,6 +53,7 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
     private final ToolExecutor tools; // 不依赖注册表实现，允许注入受控工具执行器。
     private final AgentConfig config; // 配置在构造时固化，运行期不改变行为边界。
     private final String systemPrompt; // 业务 Workflow 可以注入固定指令，用户目标不能改写此字段。
+    private final WorkingMemory workingMemory;
     private final SlidingWindowMemory memory; // 每个引擎实例独占一份记忆，会话之间不会串上下文。
     private volatile AgentListener listener = new AgentListener() { // volatile 保证跨线程替换监听器时立即可见。
     }; // 默认空实现，使回调前不必判空。
@@ -61,10 +62,14 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
         this(llm, tools, config, SYSTEM_PROMPT); // 旧入口保持默认助手行为。
     } // 结束兼容构造。
     public ReActAgent(LLMClient llm, ToolExecutor tools, AgentConfig config, String systemPrompt) { // 业务入口固定任务边界，而非固定调查顺序。
+        this(llm, tools, config, java.util.Objects.requireNonNull(systemPrompt), null);
+    }
+    public ReActAgent(LLMClient llm, ToolExecutor tools, AgentConfig config, String systemPrompt, WorkingMemory workingMemory) {
         this.llm = llm; // 保存客户端引用供每轮 Reason 使用。
         this.tools = tools; // 保存工具注册表，Act 阶段据此执行。
         this.config = config; // 保存不可变配置，循环各处的上限都从这里读取。
-        this.systemPrompt = java.util.Objects.requireNonNull(systemPrompt); // 缺少业务指令时立即失败。
+        this.workingMemory = workingMemory;
+        this.systemPrompt = (systemPrompt == null ? SYSTEM_PROMPT : systemPrompt) + (workingMemory == null ? "" : WorkingMemory.INSTRUCTIONS); // Workflow 未提供指令时使用默认值，受控运行附加记忆约定。
         this.memory = new SlidingWindowMemory(config.memoryWindowMessages(), config.memoryWindowChars()); // 记忆实例在此创建，预算直接取自配置以保证口径一致。
     } // 构造结束，依赖与记忆均已就绪。
 
@@ -74,10 +79,12 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
     } // 结束 setListener。
 
     public void resetSession() { // 清空会话：引擎可复用，但上一任务的上下文必须丢弃。
-        memory.clear(); // 清空后首轮会重新注入系统提示词。
+        memory.clear();
+        if (workingMemory != null) workingMemory.clear(); // 清空后首轮会重新注入系统提示词。
     } // 结束 resetSession。
 
     public ReActAgent newRun() { // 为每个 HTTP 请求创建独立的执行状态，避免上下文和监听器串线。
+        if (workingMemory != null) throw new IllegalStateException("受控记忆须由 Harness 为新执行创建");
         LLMClient client = llm instanceof com.agent4.llm.MockLLMClient mock ? mock.newRun() : llm; // Mock 含游标，需要独立实例；真实客户端共享配置。
         return new ReActAgent(client, tools, config, systemPrompt); // 新会话保留已选定的业务策略。
     } // 独立实例由请求持有，完成后即可回收。
@@ -103,8 +110,13 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
                 if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean()) throw new ToolExecutionException(ToolErrorCode.CANCELLED); // 每轮开始前阻止新的付费调用。
                 listener.onIterationStart(step); // 迭代开始事件不含敏感内容，UI 可安全展示进度。
 
+                if (workingMemory != null && step == 1) listener.onMemoryUpdate(workingMemory.snapshot(), 0);
+                String index = workingMemory == null ? null : workingMemory.index();
+                List<ChatMessage> context = memory.window(0, index == null ? 0 : index.length() + 1);
+                // 索引仅含服务端引用、规范工具名和状态计数，不含原始参数或观察内容。
+                if (index != null) context.set(0, ChatMessage.system(context.get(0).content() + "\n" + index));
                 ChatRequest request = new ChatRequest( // 每轮重新装配请求：窗口随迭代增长，工具清单保持一致。
-                        config.model(), memory.window(), tools.schemasForLlm(), // 记忆窗口与工具 schema 是模型的全部输入。
+                        config.model(), context, tools.schemasForLlm(), // 记忆窗口与工具 schema 是模型的全部输入。
                         config.temperature(), config.maxTokens(), config.stream()); // 采样参数与流式开关直接取自不可变配置。
                 ChatResponse response = llm.chatStream(request, listener::onAssistantDelta); // 流式调用把文本增量透传，同时仍返回完整响应供循环判断。
                 trace.addUsage(response.usage()); // 用量立即计入轨迹，异常中止时也能保留已花成本。
@@ -132,6 +144,10 @@ public final class ReActAgent { // final 类：循环逻辑只此一份，避免
                     listener.onObservation(call, observation); // 先回调再入记忆，保证 UI 与模型看到同一份文本。
                     memory.add(ChatMessage.toolResult( // 工具结果消息必须以调用 id 与 assistant 消息配对。
                             call.id() == null ? call.name() : call.id(), observation)); // 缺少 id 时退化为工具名，兼容简易实现但可能降低配对准确度。
+                    if (workingMemory != null && !WorkingMemory.RECALL_TOOL.equals(call.name())) {
+                        workingMemory.remember(tools.names().contains(call.name()) ? call.name() : "unknown", result);
+                        listener.onMemoryUpdate(workingMemory.snapshot(), step);
+                    }
                     if (!result.successful() && result.error().terminal()) throw new ToolExecutionException(result.error()); // 旧版直接使用注册表也不能在硬性错误后继续执行。
                 } // 结束本轮工具调用循环。
                 trace.addStep(new AgentTrace.StepRecord(step, response.content(), toolSteps)); // 整轮记录一次性写入轨迹，包含思考文本与全部工具步骤。

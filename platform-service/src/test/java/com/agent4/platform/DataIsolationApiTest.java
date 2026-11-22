@@ -31,6 +31,7 @@ class DataIsolationApiTest {
     @Autowired TaskStore tasks;
     @Autowired JwtEncoder encoder;
     @Autowired JwtDecoder decoder;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate memoryDb;
     @MockBean StringRedisTemplate redis;
     @BeforeEach void allowRequests() { doReturn(1L).when(redis).execute(any(RedisScript.class), anyList()); }
     String register() throws Exception {
@@ -125,4 +126,24 @@ class DataIsolationApiTest {
         mvc.perform(get("/")).andExpect(status().isOk()).andExpect(header().string("Content-Security-Policy", containsString("connect-src 'self'"))).andExpect(header().string("Content-Security-Policy", containsString("frame-ancestors 'none'"))).andExpect(header().string("Referrer-Policy", "no-referrer"));
         mvc.perform(get("/api/tasks")).andExpect(status().isUnauthorized()).andExpect(header().string("Cache-Control", containsString("no-store"))).andExpect(header().string("X-Content-Type-Options", "nosniff"));
     }
+    @Test void memoryMetadataIsOwnedAndDoesNotExposeRawObservations() throws Exception {
+        String owner = register(), other = register(); String id = submit(owner, "memory-state").path("id").asText();
+        mvc.perform(get("/api/tasks/" + id + "/memory")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/tasks/" + id + "/memory").header("Authorization", "Bearer " + owner)).andExpect(status().isOk()).andExpect(jsonPath("$.initialized").value(false));
+        var claim = tasks.claim(id, "worker").orElseThrow(); var memory = new com.agent4.agent.WorkingMemory(); memory.remember("read", com.agent4.tool.ToolResult.success("private-memory-content")); tasks.saveMemory(claim, 1, memory.snapshot());
+        String body = mvc.perform(get("/api/tasks/" + id + "/memory").header("Authorization", "Bearer " + owner)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.revision").value(1)).andExpect(jsonPath("$.items[0].reference").value("M1")).andExpect(jsonPath("$.items[0].available").value(true)).andExpect(jsonPath("$.items[0].content").doesNotExist())
+                .andExpect(header().string("Cache-Control", containsString("no-store"))).andReturn().getResponse().getContentAsString();
+        assertFalse(body.contains("private-memory-content"));
+        mvc.perform(get("/api/tasks/" + id + "/memory").header("Authorization", "Bearer " + other).header("X-User-Id", decoder.decode(owner).getSubject())).andExpect(status().isNotFound());
+        mvc.perform(get("/api/tasks/missing/memory").header("Authorization", "Bearer " + other)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/tasks/" + id + "/memory").param("attempt", "999").header("Authorization", "Bearer " + owner)).andExpect(status().isNotFound());
+    }
+    @Test void corruptedMemoryIsReportedWithoutReturningItsRawPayload() throws Exception {
+        String owner = register(), id = submit(owner, "corrupt-memory").path("id").asText();
+        var claim = tasks.claim(id, "worker").orElseThrow(); tasks.saveMemory(claim, 0, new com.agent4.agent.WorkingMemory().snapshot());
+        memoryDb.update("UPDATE task_memory SET payload_json=? WHERE task_id=?", "{private-invalid-memory", id);
+        String body = mvc.perform(get("/api/tasks/" + id + "/memory").header("Authorization", "Bearer " + owner)).andExpect(status().isConflict()).andReturn().getResponse().getContentAsString(); assertFalse(body.contains("private-invalid-memory"));
+    }
+
 }

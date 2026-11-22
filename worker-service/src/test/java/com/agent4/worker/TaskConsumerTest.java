@@ -65,6 +65,9 @@ class TaskConsumerTest { // 不需要额外部署消息服务。
             consumer.consume(message(json.writeValueAsBytes(new Dispatch(1, "incident", "trace"))), channel); // 包括安全重试、报告验收与结果结算。
             ArgumentCaptor<Result> result = ArgumentCaptor.forClass(Result.class); verify(tasks).finish(eq(claim), result.capture()); assertTrue(result.getValue().success()); assertEquals(4, json.readTree(result.getValue().answer()).path("evidence").size()); assertEquals(5, requests.get()); // 失败尝试没有变成重复证据。
             ArgumentCaptor<String> retry = ArgumentCaptor.forClass(String.class); verify(tasks).append(eq(claim), eq("tool_retry"), retry.capture()); assertEquals("TRANSIENT_FAILURE", json.readTree(retry.getValue()).path("reason").asText()); assertEquals(2, json.readTree(retry.getValue()).path("nextAttempt").asInt()); // 持久化真实恢复安排。
+            ArgumentCaptor<com.agent4.agent.WorkingMemory.Snapshot> memories = ArgumentCaptor.forClass(com.agent4.agent.WorkingMemory.Snapshot.class);
+            verify(tasks, times(5)).saveMemory(eq(claim), anyInt(), memories.capture());
+            assertEquals(4, memories.getAllValues().get(4).observations().size());
             verify(tasks, times(5)).append(eq(claim), eq("tool_attempt"), anyString()); // 四次成功与一次失败都留下安全状态。
             ArgumentCaptor<String> steps = ArgumentCaptor.forClass(String.class); verify(tasks, atLeastOnce()).append(eq(claim), eq("step"), steps.capture()); // 进度事件来自实际 Worker 回调。
             assertTrue(steps.getAllValues().stream().anyMatch(value -> value.contains("RETRYING"))); assertTrue(steps.getAllValues().get(steps.getAllValues().size() - 1).contains("VALIDATION")); assertTrue(steps.getAllValues().get(steps.getAllValues().size() - 1).contains("SUCCEEDED")); // 重试可见，正式验收结束可见。

@@ -61,7 +61,9 @@ flowchart LR
 
 运行治理位于 [`agent-core` 的 `harness` 包](agent-core/src/main/java/com/agent4/harness)，不依赖 Spring、数据库或 MQ。业务通过 `HarnessWorkflow` 扩展，工具通过 `ToolExecutor` 接入，ReAct 继续负责模型与工具交互循环。流式增量属于过程数据，正式结果事件在验收后发出。
 
-当前失联恢复仍是从持久化输入重新执行一次任务，尚未实现对话或工具执行的中途检查点恢复。运行层负责阻止到期后的新工作与正式结果发布；阻塞调用由工具超时和 Worker 心跳尽力中断。详细接口和边界见 [Harness 设计与接入指南](docs/07-harness.md)。
+执行中新增有界工作记忆：早期工具观察即使被裁出消息窗口，也可通过索引引用调用 `recall_memory` 读回；召回不重复访问源工具，并受同一调用预算、取消和时间约束。工作记忆按任务与执行尝试保存快照，所有者可查询版本及索引元数据。详见[工作记忆与执行状态](docs/10-working-memory-and-state.md)。
+
+失联恢复仍从持久化输入开始新的执行尝试，各次记忆和证据分别保存；自动跨 Worker 断点续跑尚未实现。运行层阻止到期后的新工作与正式结果发布，阻塞调用由工具超时和 Worker 心跳尽力中断。详细接口和边界见 [Harness 设计与接入指南](docs/07-harness.md)。
 
 ## 核心设计
 
@@ -153,7 +155,7 @@ docker compose up -d --scale worker=2
 | 进度浏览器验证 | `node scripts/progress-ui-smoke.mjs` | 本地固定 API/SSE 下的实际页面交互，环境准备见测试指南 |
 | 真实模型评估 | `node scripts/evaluate.mjs` | 固定任务集评估；需配置真实模型，拒绝对演示响应评分 |
 
-**最近一次本地默认回归（2026-11-21）**：全模块构建成功，21 个测试套件、137 项默认测试通过，失败、错误、跳过均为 0；新增容量退避、并发等待去重、Outbox 回滚、在途上限、Worker 清理及消息确认回归。另在独立本机 Redis 5.0.14.1 上通过 5 项真实 Lua 测试，覆盖 64 路竞争全局容量、单用户上限、释放归属、过期回收和失效续约；8 项前端进度状态测试通过，Compose 参数传递验证通过。本次未运行完整 Docker/MySQL/RabbitMQ 集成、浏览器交互或真实模型评估，未测量 QPS，详见[维护日志](docs/maintenance-log.md)。
+**最近一次本地默认回归（2026-11-21）**：全模块构建成功，23 个测试套件、152 项默认测试通过，失败、错误、跳过均为 0；新增 15 项工作记忆与状态回归，覆盖四消息窗口中的早期观察裁剪/召回、预算与取消、实例及尝试隔离、快照校验、幂等与拒绝回退、失权拒绝、事务回滚和接口元数据保护。8 项前端状态测试通过。本次未运行完整 Docker/MySQL/RabbitMQ 集成、Redis 集成、浏览器交互或真实模型评估，详见[维护日志](docs/maintenance-log.md)。
 
 [GitHub Actions 工作流](.github/workflows/ci.yml) 已配置推送、PR 和手动触发，自动执行 Java 构建、默认回归和 JavaScript 语法检查。每次云端结果以 Actions 中对应的运行记录为准，测试报告保留七天。
 
@@ -168,6 +170,7 @@ docker compose up -d --scale worker=2
 - [Harness 设计与接入指南](docs/07-harness.md)：运行契约、治理边界和业务扩展方式。
 - [数据安全与用户隔离](docs/08-data-isolation.md)：身份校验、数据访问范围、响应字段白名单及安全验证边界。
 - [并发调度与资源控制](docs/09-scheduling-and-capacity.md)：准入上限、可靠容量退避、槽位归属和并发测试。
+- [工作记忆与执行状态](docs/10-working-memory-and-state.md)：观察索引、按引用召回、快照持久化与恢复边界。
 - [测试与评估](docs/04-testing-and-benchmarks.md) · [历史验证记录](docs/05-verification.md) · [维护日志](docs/maintenance-log.md)。
 
 ## 当前范围与后续方向

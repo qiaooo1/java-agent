@@ -140,6 +140,29 @@ public class TaskStore { // 第一版使用共享数据库，不伪装为独立�
             appendLocked(task, claim.attemptNo(), type, data); // 写入完整事件。
         }); // 完成事件事务。
     } // 结束受保护事件写入。
+    public void saveMemory(Claim claim, int iteration, com.agent4.agent.WorkingMemory.Snapshot snapshot) {
+        if (iteration < 0 || iteration > 1000) throw new IllegalArgumentException("记忆迭代编号无效");
+        var checked = new com.agent4.agent.WorkingMemory(); checked.restore(snapshot);
+        String payload = encode(snapshot);
+        if (payload.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 512000) throw new IllegalArgumentException("工作记忆快照过大");
+        tx.executeWithoutResult(status -> {
+            Task task = locked(claim.task().id());
+            if (!valid(task, claim) || task.cancelRequested()) throw new BusinessException(409, "执行权已失效或任务已请求取消");
+            record MemoryRow(long revision, int iteration, int sequence, String payload) {}
+            var previous = db.query("SELECT revision,iteration,observation_seq,payload_json FROM task_memory WHERE task_id=? AND attempt_no=?", (r, n) -> new MemoryRow(r.getLong("revision"), r.getInt("iteration"), r.getInt("observation_seq"), r.getString("payload_json")), task.id(), claim.attemptNo());
+            long revision = 1;
+            if (!previous.isEmpty()) {
+                var old = previous.get(0);
+                int oldIteration = old.iteration(), oldSeq = old.sequence();
+                String oldPayload = old.payload();
+                if (iteration < oldIteration || snapshot.nextReference() - 1 < oldSeq || (snapshot.nextReference() - 1 == oldSeq && !payload.equals(oldPayload))) throw new BusinessException(409, "工作记忆状态不能回退或改写");
+                if (iteration == oldIteration && payload.equals(oldPayload)) return;
+                revision = old.revision() + 1;
+                db.update("UPDATE task_memory SET revision=?,iteration=?,observation_seq=?,payload_json=?,updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND attempt_no=?", revision, iteration, snapshot.nextReference() - 1, payload, task.id(), claim.attemptNo());
+            } else db.update("INSERT INTO task_memory(task_id,attempt_no,revision,iteration,observation_seq,payload_json) VALUES(?,?,?,?,?,?)", task.id(), claim.attemptNo(), revision, iteration, snapshot.nextReference() - 1, payload);
+            appendLocked(task, claim.attemptNo(), "memory", encode(Map.of("revision", revision, "iteration", iteration, "entries", snapshot.observations().size(), "storedChars", checked.storedChars(), "evicted", snapshot.evicted(), "omitted", snapshot.omitted())));
+        });
+    }
     public boolean finish(Claim claim, Result result) { // 最终状态、账本、额度和终态事件使用一个事务。
         return tx.execute(status -> { // 中途失败时全部回滚。
             Task task = locked(claim.task().id()); // 首先确定当前执行权。

@@ -211,4 +211,47 @@ class TaskStoreTest { // H2 验证事务逻辑，真实 MySQL 由独立集成测
         } finally { pool.shutdownNow(); }
     }
 
+    @Test void memoryStateAndMetadataEventAreAtomicIdempotentAndRejectRollback() {
+        Task task = submit("memory"); Claim claim = tasks.claim(task.id(), "worker").orElseThrow();
+        var memory = new com.agent4.agent.WorkingMemory(); var initial = memory.snapshot(); tasks.saveMemory(claim, 0, initial);
+        int seq = tasks.get(task.id()).nextSeq(); tasks.saveMemory(claim, 0, initial); assertEquals(seq, tasks.get(task.id()).nextSeq());
+        memory.remember("read", com.agent4.tool.ToolResult.success("private-observation-content")); tasks.saveMemory(claim, 1, memory.snapshot());
+        assertEquals(2L, db.queryForObject("SELECT revision FROM task_memory WHERE task_id=?", Long.class, task.id()));
+        assertTrue(db.queryForObject("SELECT payload_json FROM task_memory WHERE task_id=?", String.class, task.id()).contains("private-observation-content"));
+        assertTrue(tasks.events("u", task.id(), 0).stream().filter(event -> event.type().equals("memory")).noneMatch(event -> event.data().contains("private-observation-content")));
+        int after = tasks.get(task.id()).nextSeq();
+        assertEquals(409, assertThrows(BusinessException.class, () -> tasks.saveMemory(claim, 0, initial)).status);
+        assertEquals(after, tasks.get(task.id()).nextSeq());
+        var view = new TaskMemoryStore(tasks, db, new ObjectMapper()).view("u", task.id(), null);
+        assertTrue(view.initialized()); assertEquals(1, view.items().size()); assertEquals("M1", view.items().get(0).reference());
+        assertEquals(404, assertThrows(BusinessException.class, () -> new TaskMemoryStore(tasks, db, new ObjectMapper()).view("other", task.id(), 1)).status);
+    }
+    @Test void lostLeaseCannotOverwriteMemoryOfANewAttempt() {
+        Task task = submit("memory-recovery"); Claim old = tasks.claim(task.id(), "old-worker").orElseThrow();
+        var memory = new com.agent4.agent.WorkingMemory(); memory.remember("read", com.agent4.tool.ToolResult.success("old-attempt")); tasks.saveMemory(old, 1, memory.snapshot());
+        db.update("UPDATE task SET lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP) WHERE id=?", task.id()); tasks.recoverExpired();
+        db.update("UPDATE task SET available_at=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP) WHERE id=?", task.id());
+        Claim current = tasks.claim(task.id(), "new-worker").orElseThrow(); var store = new TaskMemoryStore(tasks, db, new ObjectMapper());
+        assertFalse(store.view("u", task.id(), null).initialized()); assertEquals(2, store.view("u", task.id(), null).attemptNo());
+        assertTrue(store.view("u", task.id(), 1).initialized());
+        assertEquals(409, assertThrows(BusinessException.class, () -> tasks.saveMemory(old, 2, memory.snapshot())).status);
+        var fresh = new com.agent4.agent.WorkingMemory(); fresh.remember("read", com.agent4.tool.ToolResult.success("fresh-attempt")); tasks.saveMemory(current, 1, fresh.snapshot());
+        assertEquals(2, count("task_memory"));
+        assertTrue(db.queryForObject("SELECT payload_json FROM task_memory WHERE task_id=? AND attempt_no=1", String.class, task.id()).contains("old-attempt"));
+        assertTrue(db.queryForObject("SELECT payload_json FROM task_memory WHERE task_id=? AND attempt_no=2", String.class, task.id()).contains("fresh-attempt"));
+    }
+    @Test void cancelledOrFinishedClaimsCannotWriteMemory() {
+        Task task = submit("cancelled-memory"); Claim claim = tasks.claim(task.id(), "worker").orElseThrow(); tasks.cancel("u", task.id());
+        var memory = new com.agent4.agent.WorkingMemory();
+        assertEquals(409, assertThrows(BusinessException.class, () -> tasks.saveMemory(claim, 0, memory.snapshot())).status);
+        tasks.finish(claim, success()); assertEquals(409, assertThrows(BusinessException.class, () -> tasks.saveMemory(claim, 0, memory.snapshot())).status);
+        assertEquals(0, count("task_memory"));
+    }
+    @Test void memoryWriteRollsBackIfItsAuditEventCannotBeCommitted() {
+        Task task = submit("failed-memory"); Claim claim = tasks.claim(task.id(), "worker").orElseThrow(); int seq = tasks.get(task.id()).nextSeq();
+        db.execute("DROP TABLE task_event"); var memory = new com.agent4.agent.WorkingMemory();
+        assertThrows(org.springframework.dao.DataAccessException.class, () -> tasks.saveMemory(claim, 0, memory.snapshot()));
+        assertEquals(0, count("task_memory")); assertEquals(seq, tasks.get(task.id()).nextSeq()); assertEquals(1, tasks.account("u").reservedTasks());
+    }
+
 } // 结束任务事务测试。

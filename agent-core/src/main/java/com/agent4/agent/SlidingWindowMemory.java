@@ -32,7 +32,11 @@ public final class SlidingWindowMemory { // 非线程安全，由单个引擎实
 
     /** 当前窗口内的消息（按顺序）。 */
     public List<ChatMessage> window() { // 返回副本，调用方修改列表不会影响内部窗口。
-        trim(); // 仅在下一次模型请求前裁剪完整消息组。
+        return window(0, 0);
+    }
+    public List<ChatMessage> window(int reservedMessages, int reservedChars) {
+        if (reservedMessages < 0 || reservedChars < 0 || reservedMessages >= maxMessages || reservedChars >= maxChars) throw new IllegalStateException("记忆索引超过上下文预算");
+        trim(maxMessages - reservedMessages, maxChars - reservedChars); // 索引同样占用请求预算。
         return new ArrayList<>(messages); // 消息按时间顺序返回，模型据此理解对话。
     } // 结束 window。
 
@@ -45,7 +49,7 @@ public final class SlidingWindowMemory { // 非线程安全，由单个引擎实
     } // 结束 clear。
 
     /** 裁剪：成组淘汰可删除历史，同时固定系统指令、当前问题与最新交互。 */
-    private void trim() { // 私有裁剪在每次请求前调用，运行中不修改窗口。
+    private void trim(int maxMessages, int maxChars) { // 私有裁剪在每次请求前调用，运行中不修改窗口。
         long chars = characters(); // 固定消息也必须计入字符预算。
         if (messages.size() <= maxMessages && chars <= maxChars) return; // 正常窗口不重排、不删除历史。
         List<ChatMessage> snapshot = new ArrayList<>(messages); // 先在快照上裁剪，失败时不破坏原始历史。

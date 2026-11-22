@@ -47,7 +47,7 @@ class AgentHarnessTest { // 同一 Harness 支持多次独立运行。
             assertFalse(result.successful()); assertTrue(result.error().contains("PERMISSION_DENIED")); assertEquals(1, result.toolCalls()); assertEquals(0, probe.forbidden.get()); // 越权尝试扣预算并停止，没有副作用。
             assertEquals(ToolErrorCode.PERMISSION_DENIED, attempts.get(0).error()); // 拒绝按类型处理，不交给模型寻找绕过方式。
             var capture = org.mockito.ArgumentCaptor.forClass(ChatRequest.class); verify(model, times(1)).chatStream(capture.capture(), any()); // 权限错误后不能再请求模型。
-            assertEquals(List.of("allowed"), capture.getAllValues().get(0).tools().stream().map(node -> node.path("function").path("name").asText()).toList()); // 底层多余工具不能通过声明泄露。
+            assertEquals(List.of("allowed", "recall_memory"), capture.getAllValues().get(0).tools().stream().map(node -> node.path("function").path("name").asText()).toList()); // 底层多余工具不能通过声明泄露。
         } finally { tools.closeWorkers(); } // 失败时也不遗留线程池。
     } // 结束工具授权场景。
     @ParameterizedTest @ValueSource(strings = {"unknown", "malformed"}) void badCallsConsumeBudgetBeforeAnyAdditionalTool(String kind) { // 未知工具和坏参数都不能免费无限重试。

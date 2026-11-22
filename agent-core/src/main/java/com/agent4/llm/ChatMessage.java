@@ -21,6 +21,8 @@ public record ChatMessage( // 用 record 生成不可变消息，避免多轮循
         String toolCallId, // tool_call_id 仅 tool 消息使用，缺失会被服务端拒绝。
         List<ToolCall> toolCalls) { // tool_calls 允许一次多个调用，序列化时按字段是否为空决定省略。
 
+    public ChatMessage { if (toolCalls != null) toolCalls = List.copyOf(toolCalls); }
+
     /** 普通文本消息。 */
     public ChatMessage(String role, String content) { // 普通消息走两参构造，工具字段显式置空而不依赖默认值。
         this(role, content, null, null); // 统一委托主构造，防止出现字段不一致的半成品消息。
