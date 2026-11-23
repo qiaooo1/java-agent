@@ -23,7 +23,7 @@ public final class AgentConfig { // final 类：配置在构造后冻结，可�
     private final int memoryWindowMessages; // 记忆条数上限，与字符预算共同决定每次请求的上下文规模。
     /** 滑动窗口记忆的字符预算上限（与条数上限取更严者）。 */
     private final int memoryWindowChars; // 字符预算防止单条超长工具输出瞬间撑爆上下文窗口。
-    /** 连续失败熔断阈值：连续 N 步工具调用全失败则中止。 */
+    /** 连续失败阈值：业务轮次和纯召回轮次分别统计，任一失败序列达到上限即中止。 */
     private final int consecutiveFailureLimit; // 连续失败阈值，用于区分偶发错误与系统性故障。
     /** 是否启用 SSE 流式输出。 */
     private final boolean stream; // 是否流式，决定 UI 逐字渲染还是一次性展示。
@@ -88,7 +88,7 @@ public final class AgentConfig { // final 类：配置在构造后冻结，可�
         private long toolTimeoutMs = 30_000; // 默认三十秒超时，覆盖慢速外部接口，超时后让模型自愈。
         private int memoryWindowMessages = 40; // 默认四十条消息，约十轮 ReAct 往返，兼顾上下文与成本。
         private int memoryWindowChars = 60_000; // 默认六万字符预算，防止单条超长输出一次撑爆窗口。
-        private int consecutiveFailureLimit = 3; // 默认连续三步全失败才熔断，避开偶发抖动。
+        private int consecutiveFailureLimit = 3; // 两类失败序列默认均为三轮，记忆命中不清零业务失败。
         private boolean stream = true; // 默认开启流式，降低首字延迟。
 
         public Builder model(String model) { // 链式 setter：返回 Builder 自身，便于一行装配全部参数。
